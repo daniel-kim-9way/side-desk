@@ -91,7 +91,8 @@ let sendConfirmOn = true
 let notifyOn = true
 let tab: TabName = 'pin'
 // 시작할 때 저절로 열린 창인지. 내가 /desk 로 연 창은 아니에요.
-let autoOpened = false
+let openedByUser = false // /desk 로 직접 연 적이 있는지
+let inlineClosed = false // 입력창 위에 열린 창을 이미 한 번 닫았는지
 let snap: Snapshot | undefined
 let baseline: { at: number; windows: UsageWindow[] } | null = null
 let turnCount = 0
@@ -325,17 +326,26 @@ async function pasteClip($: EngineInterface, c: Clip): Promise<boolean> {
 
 // 세션을 시작할 때 책상을 옆에 열어 둬요. 기본은 꺼져 있어요(autoOpen: always 로 켤 수 있어요).
 // 키보드 포커스는 가져오지 않아서, 바로 입력창에 쓸 수 있어요.
+let autoTried = false // 이 프로세스에서 자동으로 한 번 열어 봤는지. 닫은 걸 다시 열지 않으려고요.
 async function autoOpenDesk($: EngineInterface) {
   try {
+    if (autoTried) return
     if (cfg.autoOpen === 'off') return
     if (!(await isInteractive($))) return
+    autoTried = true
     await refreshUsage($)
     updateStatus($)
     if (tab === 'clip') void watchClipboard($)
-    autoOpened = true
-    await $.ui.open({ id: PANE, title: '책상', columns: cfg.paneColumns, closeOnEscape: true })
-  } catch {
+    const opened = await $.ui.open({ id: PANE, title: '책상', columns: cfg.paneColumns, closeOnEscape: true })
+    if (opened && opened.isPlaced === false) {
+      // 저절로 연 창은 터미널이 144칸 미만이면 그려지지 않고 기다려요. 이유를 보여 줘요.
+      const why = String((opened as { reason?: unknown }).reason ?? '')
+      $.ui.toast(`책상을 아직 못 그렸어요(${why}). /desk 를 치면 바로 열려요.`, { timeoutMs: 15000 })
+    }
+  } catch (err) {
     // 옆 창이 안 열려도 대화는 그대로 해요.
+    $.ui.log(`책상을 자동으로 열지 못했어요: ${String(err)}`)
+    $.ui.toast(`책상을 자동으로 열지 못했어요: ${String(err)}`, { timeoutMs: 15000 })
   }
 }
 
@@ -470,11 +480,30 @@ async function saveBoard($: EngineInterface) {
   }
 }
 
+// 입력창 위에 열린 책상을 닫아요. 닫기가 거절되면 다음에 내가 말을 보낼 때 한 번 더 해요.
+let inlinePending = false
+async function closeInlineDesk($: EngineInterface) {
+  try {
+    await $.ui.close({ id: PANE })
+    inlinePending = false
+  } catch (err) {
+    inlinePending = true
+    $.ui.log(`입력창 위에 열린 책상을 닫지 못했어요: ${String(err)}`)
+  }
+}
+
 async function registerCommand($: EngineInterface, spec: { name: string; description: string; argumentHint?: string; immediate?: true }) {
   try {
     await $.command.register(spec)
-  } catch (err) {
-    $.ui.log(`/${spec.name} 명령을 등록하지 못했어요: ${String(err)}`)
+  } catch {
+    // 이미 쓰는 이름이면 «desk-» 를 붙여 다시 등록해요. 그래도 안 되면 로그만 남겨요.
+    try {
+      if (spec.name.startsWith('desk')) throw new Error('이름 겹침')
+      await $.command.register({ ...spec, name: `desk-${spec.name}` })
+      $.ui.log(`/${spec.name} 은(는) 이미 쓰는 이름이라 /desk-${spec.name} 으로 등록했어요.`)
+    } catch (err) {
+      $.ui.log(`/${spec.name} 명령을 등록하지 못했어요: ${String(err)}`)
+    }
   }
 }
 
@@ -894,7 +923,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'desk' }, async ($, e) => {
     if (e.args.trim() === 'text') return { text: await deskText($) }
-    autoOpened = false // 내가 직접 연 창은 입력창 위에 열려도 닫지 않아요.
+    openedByUser = true // 내가 직접 연 창은 입력창 위에 열려도 닫지 않아요.
     await refreshUsage($)
     updateStatus($)
     // 창을 다시 열었는데 «클립» 탭이 선택돼 있으면 바로 읽어요.
@@ -921,7 +950,8 @@ export const register: Register = (on, options) => {
     return { text: `프롬프트 가이드를 ${coachOn ? '켰어요' : '껐어요'}.` }
   })
 
-  on('command.run', { command: 'handoff' }, async ($, e) => {
+  // 같은 이름의 /handoff 가 이미 있으면 우리 것은 /desk-handoff 로 등록돼요. 둘 다 같은 일을 해요.
+  for (const command of ['handoff', 'desk-handoff']) on('command.run', { command }, async ($, e) => {
     const arg = e.args.trim()
     if (arg === 'now') {
       if (!(await isInteractive($))) return { text: '화면이 있는 세션에서만 넘길 수 있어요.' }
@@ -1020,10 +1050,11 @@ export const register: Register = (on, options) => {
     // 옆이 아니라 입력창 위에 열렸다면(클래식 화면) 마우스가 안 눌려요. 클릭은 풀스크린 화면에서만 와요.
     const inline = e.props.placement === 'inline'
     const unfocused = e.props.isFocused === false
-    if (inline && autoOpened) {
-      // 내가 연 게 아니라 시작할 때 저절로 열린 창이에요. 눌리지도 않는 창이 입력창 위를 차지하지 않게 닫아요.
-      autoOpened = false
-      void $.ui.close({ id: PANE })
+    // 풀스크린이 아닌 것이 확실할 때만 닫아요. 시작 직후 너비를 못 쟀거나(모름) 풀스크린인데 잠깐 좁은 때는 그대로 둬요.
+    if (inline && e.viewport?.isFullscreen === false && !openedByUser && !inlineClosed) {
+      // /desk 로 연 게 아니라 저절로(또는 이전 대화에서) 열린 창이에요. 눌리지도 않는 창이 입력창 위를 차지하지 않게 닫아요.
+      inlineClosed = true
+      void closeInlineDesk($)
       $.ui.toast('책상을 자동으로 열지 않았어요. 이 화면에서는 눌러서 쓸 수 없어요. /desk 로 열거나 /tui fullscreen 으로 바꿔 보세요.', { timeoutMs: 12000 })
     }
     const notice =
@@ -1156,6 +1187,7 @@ export const register: Register = (on, options) => {
     if (isPerson) {
       unattended = 0
       pausedSession = undefined
+      if (inlinePending && !openedByUser) void closeInlineDesk($)
       // 내가 답했으니 «내가 정해야 하는 것»의 자동 항목을 내려요.
       if (board.decisions.some(d => d.id === 'auto')) {
         board = withAutoDecision(board, undefined)
@@ -1201,11 +1233,24 @@ export const register: Register = (on, options) => {
     return next({ ...e, text: choice })
   })
 
+  // 시작하는 순간에는 화면(터미널)이 아직 안 붙어 있을 수 있어요. 그러면 열지 못하고 끝나니, 화면이 붙을 때 한 번 더 시도해요.
+  // autoOpenDesk 가 한 번만 열도록 막고 있어서 두 번 열리지는 않아요.
+  on('session.attach', async ($, e, next) => {
+    const r = await next(e)
+    void autoOpenDesk($)
+    return r
+  })
+
   // /clear 뒤: 핀을 새 대화로 옮기고, 이어가기 메모를 읽으라는 첫 메시지를 넣어요.
   on('classic.SessionStart', async ($, e, next) => {
     const r = await next(e)
     if (e.source === 'resume' || e.source === 'fork') await loadBoard($)
-    if (e.source === 'startup' || e.source === 'resume') void autoOpenDesk($)
+    // 시작·이어하기뿐 아니라 /tui 로 다시 뜬 세션도 있어서, clear·compact 만 빼고 한 번은 열어 봐요.
+    if (e.source !== 'compact' && e.source !== 'clear') {
+      void autoOpenDesk($)
+      // 시작 순간에는 화면이 아직 안 붙어 있고 attach 신호도 안 올 때가 있어요. 몇 초 안에 한 번씩만 다시 봐요(한 번 열면 끝).
+      for (const sec of [1, 3, 8, 20]) $.clock.after(sec * 1000, () => void autoOpenDesk($))
+    }
     if (e.source !== 'clear') return r
     const p = pending
     pending = undefined
