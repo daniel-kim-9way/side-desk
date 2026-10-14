@@ -1,0 +1,29 @@
+side-desk 은 아래 오픈소스 모드들의 구조와 아이디어를 참고해서 만들었습니다.
+일부 함수(핀 갱신, 사용량 계산, 프롬프트 판정 등)는 원본과 거의 같은 형태입니다.
+모두 MIT 라이선스이며, 라이선스가 요구하는 저작권 표기를 아래에 남깁니다.
+
+--------------------------------------------------------------------------------
+pinboard — 할 일·결정 고정, 시스템 프롬프트 끝에 보드 싣기
+https://github.com/sirkitree/pinboard
+
+MIT License
+Copyright (c) 2026 Jerad Bitner
+--------------------------------------------------------------------------------
+usage-meter, prompt-coach — 사용 한도·소모 속도 계산, 프롬프트 판정과 보내기 흐름
+https://github.com/mishgoldenberg/claude-mods
+
+MIT License
+Copyright (c) 2026 Michael Goldenberg
+--------------------------------------------------------------------------------
+claude-auto-handoff — 대화가 길어지면 메모를 쓰고 새 대화로 넘기는 흐름
+https://github.com/alexknowshtml/claude-auto-handoff
+
+MIT License
+Copyright (c) 2026 Alex Hillman
+--------------------------------------------------------------------------------
+
+MIT 라이선스 전문은 각 저장소의 LICENSE 파일에 있습니다.
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+the software and associated documentation files, to deal in the software without
+restriction, subject to the inclusion of the above copyright notice and this
+permission notice in all copies or substantial portions of the software.

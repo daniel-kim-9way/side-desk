@@ -1,0 +1,4 @@
+{
+  "description": "side-desk: 핀 · 사용 · 이어가기 · 클립 · 설정",
+  "modules": ["./register.tsx"]
+}

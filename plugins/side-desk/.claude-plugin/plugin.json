@@ -1,0 +1,83 @@
+{
+  "name": "side-desk",
+  "version": "0.1.0",
+  "description": "Claude Code 옆에 «책상»을 열어 줘요. 할 일 고정, 사용 한도, 대화 이어가기, 클립보드 기록, 보내기 전 확인.",
+  "author": { "name": "side-desk authors" },
+  "license": "MIT",
+  "repository": "https://github.com/daniel-kim-9way/side-desk",
+  "keywords": ["claude-code", "mod", "korean", "windows", "non-developer"],
+  "userConfig": {
+    "warnAt": {
+      "type": "number",
+      "title": "사용 한도 알림 기준(%)",
+      "description": "5시간·7일 한도가 이 값을 넘으면 알려 줘요. 95%에서 한 번 더 알려 줘요.",
+      "default": 80
+    },
+    "handoffMode": {
+      "type": "string",
+      "title": "대화 이어가기 방식 (ask / auto / off)",
+      "description": "ask = 대화가 길어지면 메모를 쓰고 새 대화로 넘길지 물어봐요. auto = 묻지 않고 넘겨요. off = 하지 않아요.",
+      "default": "ask"
+    },
+    "handoffTokens": {
+      "type": "number",
+      "title": "이어가기 기준(양)",
+      "description": "대화가 이 양(토큰)을 넘으면 이어가기를 시작해요. 아래 %와 둘 중 먼저 닿는 쪽이 기준이에요.",
+      "default": 400000
+    },
+    "handoffPercent": {
+      "type": "number",
+      "title": "이어가기 기준(대화 길이 %)",
+      "description": "대화 길이가 이 비율을 넘으면 이어가기를 시작해요.",
+      "default": 50
+    },
+    "maxUnattended": {
+      "type": "number",
+      "title": "연속 자동 이어가기 한도",
+      "description": "auto 방식에서, 내가 메시지를 쓰지 않아도 연달아 넘길 수 있는 횟수예요. 넘으면 멈춰요.",
+      "default": 2
+    },
+    "coach": {
+      "type": "string",
+      "title": "프롬프트 가이드 (on / off)",
+      "description": "보내기 직전에 요청이 흐릿하면 더 분명한 문장을 내밀어요. 켜면 요청마다 작은 모델을 한 번 더 써요.",
+      "default": "off"
+    },
+    "coachModel": {
+      "type": "string",
+      "title": "프롬프트 가이드가 쓰는 모델",
+      "description": "프롬프트 가이드가 쓰는 작은 모델이에요.",
+      "default": "haiku"
+    },
+    "sendConfirm": {
+      "type": "string",
+      "title": "보내기 전 확인 (on / off)",
+      "description": "메일 보내기, 광고 변경, 일정 초대, 드라이브 공유처럼 바깥으로 나가는 일은 보내기 전에 내용을 보여 주고 물어요.",
+      "default": "on"
+    },
+    "notify": {
+      "type": "string",
+      "title": "윈도우 알림 (on / off)",
+      "description": "오래 걸린 일이 끝났을 때, 확인이나 질문이 필요할 때 알림을 띄워요. 윈도우에서만 돼요.",
+      "default": "on"
+    },
+    "notifyMinSeconds": {
+      "type": "number",
+      "title": "알림을 띄울 작업 시간(초)",
+      "description": "이 시간 넘게 걸린 일이 끝나면 알림을 띄워요.",
+      "default": 60
+    },
+    "autoOpen": {
+      "type": "string",
+      "title": "시작할 때 책상 자동으로 열기 (always / off)",
+      "description": "always = Claude Code를 시작할 때마다 옆에 책상을 열어요. off = /desk 를 칠 때만 열어요. 터미널 폭이 144칸보다 좁으면 자동으로는 열리지 않아요.",
+      "default": "off"
+    },
+    "paneColumns": {
+      "type": "number",
+      "title": "책상 너비(칸)",
+      "description": "책상이 처음 열릴 때의 너비예요. 30~120. 열린 뒤에는 Ctrl+X 다음에 좌우 화살표로 바꿀 수 있어요.",
+      "default": 40
+    }
+  }
+}

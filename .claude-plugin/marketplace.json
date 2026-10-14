@@ -1,0 +1,16 @@
+{
+  "name": "side-desk",
+  "owner": { "name": "side-desk authors" },
+  "metadata": {
+    "description": "Claude Code 옆에 «책상»을 열어 주는 모드",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "side-desk",
+      "source": "./plugins/side-desk",
+      "description": "할 일 고정 · 사용 한도 · 대화 이어가기 · 클립보드 기록 · 보내기 전 확인을 Claude Code 옆 창 하나에.",
+      "category": "productivity"
+    }
+  ]
+}
