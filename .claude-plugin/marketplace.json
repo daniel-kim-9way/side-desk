@@ -1,6 +1,6 @@
 {
   "name": "side-desk",
-  "owner": { "name": "side-desk authors" },
+  "owner": { "name": "daniel.kim" },
   "metadata": {
     "description": "Claude Code 옆에 «책상»을 열어 주는 모드",
     "version": "0.1.0"

@@ -23,7 +23,25 @@ claude plugin marketplace add daniel-kim-9way/side-desk
 claude plugin install side-desk@side-desk
 ```
 
+![설치 두 줄과 새로고침](docs/install.png)
+
 설치가 끝나면 Claude Code를 다시 열거나 `/reload-plugins`를 치세요. 그다음 입력창에 `/desk`를 치면 옆에 책상이 열려요.
+
+## 이렇게 보여요
+
+> 아래 그림은 설명용 예시 화면이에요. 숫자와 할 일은 예시고, 글자 배치는 실제 화면과 같아요.
+
+**할 일** — Claude가 쌓은 할 일과, 내 답을 기다리는 질문
+
+![할 일 탭](docs/desk-todo.png)
+
+**사용량** — 사용 한도와 대화 길이
+
+![사용량 탭](docs/desk-usage.png)
+
+**이어가기** — 대화가 너무 길어지면 새 대화로 넘겨요
+
+![이어가기 탭](docs/desk-handoff.png)
 
 ## 탭 다섯 개
 
