@@ -16,6 +16,8 @@ side-desk는 Claude Code 화면 옆에 작은 창을 열어서 이걸 한 곳에
 
 ## 설치 (2줄)
 
+**먼저 버전을 확인하세요.** 터미널에 `claude --version`을 쳐서 **2.1.287 이상**인지 봐요. 그보다 낮으면 `claude update`를 먼저 치세요. 낮은 버전에 설치하면 `Failed to load hooks ... expected record` 오류가 나요.
+
 Claude Code에 아래 두 줄을 한 줄씩 붙여 넣고 엔터를 누르세요.
 
 ```
@@ -77,6 +79,8 @@ claude plugin install side-desk@side-desk
 윈도우의 클립보드 기록(Win+V)에는 **비밀번호처럼 복사해 둔 글도 남아요.** 클립보드 탭은 그걸 그대로 보여 주고, 줄을 누르면 입력창에 넣어요. 보내기 전에 눈으로 확인하세요. 이 모드는 클립보드 내용을 따로 저장하지 않아요.
 
 ## 자주 묻는 것
+
+**설치했더니 `Failed to load hooks ... "expected": "record" ... "path": ["hooks"]` 오류가 나요.** Claude Code가 2.1.287보다 낮은 버전이라 이 모드를 못 읽는 거예요. 터미널에서 `claude update`를 치고 Claude Code를 다시 여세요. `claude --version`이 2.1.287 이상이면 오류가 사라져요. 다시 설치할 필요는 없어요.
 
 **옆 창이 안 열려요.** 터미널 폭이 144칸보다 좁으면 자동으로는 열리지 않아요. `/desk`로 열면 돼요. `/reload-plugins`를 치고 다시 해 보세요.
 
