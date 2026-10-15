@@ -3,7 +3,7 @@
   "owner": { "name": "daniel.kim" },
   "metadata": {
     "description": "Claude Code 옆에 «책상»을 열어 주는 모드",
-    "version": "0.5.0"
+    "version": "0.5.1"
   },
   "plugins": [
     {

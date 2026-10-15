@@ -1603,7 +1603,7 @@ export const register: Register = (on, options) => {
     // 명령어는 이름이 겹치면 던지니까 맨 뒤에서, 하나씩 감싸서 등록해요.
     await registerCommand($, { name: 'desk', description: '책상 열기: 할 일(일정 포함)·메일·사용량(이어가기 포함)·클립·명령·설정. text 는 글로 보기, check 는 처음 설정 점검', argumentHint: '[text|check]', immediate: true })
     await registerCommand($, { name: 'coach', description: '프롬프트 가이드 켜기·끄기', argumentHint: '[on|off]' })
-    await registerCommand($, { name: 'handoff', description: '대화를 새 대화로 넘겨요', argumentHint: '[now|ask|auto|off]', immediate: true })
+    await registerCommand($, { name: 'desk-handoff', description: '대화를 새 대화로 넘겨요(이어가기)', argumentHint: '[now|ask|auto|off]', immediate: true })
     await registerCommand($, { name: 'clip', description: '클립보드의 글을 입력창에 붙여요. 이미지는 파일로 저장하고 경로를 붙여요', immediate: true })
     return next(e)
   })
@@ -1644,8 +1644,8 @@ export const register: Register = (on, options) => {
     return { text: `프롬프트 가이드를 ${coachOn ? '켰어요' : '껐어요'}.` }
   })
 
-  // 같은 이름의 /handoff 가 이미 있으면 우리 것은 /desk-handoff 로 등록돼요. 둘 다 같은 일을 해요.
-  for (const command of ['handoff', 'desk-handoff']) on('command.run', { command }, async ($, e) => {
+  // 이름은 처음부터 /desk-handoff 예요. /handoff 는 다른 플러그인이나 내 명령이 이미 쓰는 일이 많아서, 그 명령을 가로채지 않으려고 듣지 않아요.
+  on('command.run', { command: 'desk-handoff' }, async ($, e) => {
     const arg = e.args.trim()
     if (arg === 'now') {
       if (!(await isInteractive($))) return { text: '화면이 있는 세션에서만 넘길 수 있어요.' }

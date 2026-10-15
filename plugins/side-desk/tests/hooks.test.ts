@@ -307,3 +307,27 @@ test('맥·리눅스: 알림은 PowerShell 대신 Claude Code 의 터미널 알�
   await s.ask($, 'Write', { file_path: '/w/a.md' })
   expect(s.notes[1]).toEqual({ text: 'Write: /w/a.md', title: '승인을 기다려요' })
 })
+
+// ───────────── 명령 이름 ─────────────
+
+test('이어가기 명령은 처음부터 /desk-handoff 로 등록하고, 남의 /handoff 는 가로채지 않아요', async ($, on) => {
+  const s = stub(on, ['terminal'], '보내기')
+  const registered: string[] = []
+  on('session.start', () => ({ cwd: '/work' }))
+  on('tool.register', () => ({ value: undefined }))
+  on('command.register', ($: any, e: any) => {
+    registered.push(e.name)
+    return { value: undefined }
+  })
+  on('fs.read', () => ({ value: '' }))
+  // 다른 플러그인이나 내 명령의 /handoff 가 답하는 자리
+  on('command.run', ($: any, e: any) => ({ text: `남의 ${e.command}` }))
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await s.clock.advance(0)
+  expect(registered).toContain('desk-handoff')
+  expect(registered).not.toContain('handoff')
+  const theirs = await $.command.run({ command: 'handoff', args: '' })
+  expect(theirs.text).toBe('남의 handoff')
+  const ours = await $.command.run({ command: 'desk-handoff', args: 'status' })
+  expect(ours.text).toMatch(/이어가기/)
+})

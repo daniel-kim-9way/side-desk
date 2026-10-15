@@ -76,7 +76,7 @@ claude plugin install side-desk@side-desk
 |---|---|
 | `/desk` | 책상을 열어요. `/desk text`는 글로 요약해서 보여 주고, `/desk check`는 처음 설정 점검을 글로 보여 줘요. |
 | `/clip` | 지금 클립보드의 글을 입력창에 붙여요. 이미지는 파일로 저장하고 그 경로를 붙여요. |
-| `/handoff` | 대화를 지금 새 대화로 넘겨요. |
+| `/desk-handoff` | 대화를 지금 새 대화로 넘겨요. `/handoff`가 아니라 `/desk-handoff`예요(다른 플러그인의 `/handoff`와 안 겹치게). |
 | `/coach` | 프롬프트 가이드를 켜고 꺼요. |
 
 ## 무엇을 하나요 (꼭 읽어 주세요)
