@@ -169,6 +169,7 @@ export const COMMAND_GUIDE: readonly Guide[] = [
   { name: 'permissions', text: '묻지 않고 쓸 도구를 정해요' },
   { name: 'memory', text: 'Claude가 늘 읽는 지침 파일(CLAUDE.md)을 고쳐요' },
   { name: 'tui', arg: 'fullscreen', text: '책상을 옆에 붙이고 마우스로 누를 수 있게 해요' },
+  { name: 'reload-plugins', text: '고친 모드나 새로 설치한 플러그인을 껐다 켜지 않고 바로 불러와요' },
   { name: 'doctor', text: '설치에 문제가 없는지 점검해요' },
   { name: 'help', text: '명령 전체 목록을 봐요' },
 ]

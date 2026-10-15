@@ -175,8 +175,9 @@ test('설정 탭: 자주 쓰는 명령을 누르면 입력창에 넣기만 하�
   expect(await ui.find({ key: 'cmd-rewind' })).toBeDefined()
   await ui.press({ key: 'cmd-compact' })
   await ui.press({ key: 'cmd-tui' })
+  await ui.press({ key: 'cmd-reload-plugins' })
   await clock.advance(0)
-  expect(filled).toEqual(['/compact', '/tui fullscreen'])
+  expect(filled).toEqual(['/compact', '/tui fullscreen', '/reload-plugins'])
   await ui.unmount()
 })
 
