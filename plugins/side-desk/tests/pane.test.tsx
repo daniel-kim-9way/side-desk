@@ -59,11 +59,15 @@ test('사용 탭: 비용과 한도가 그려져요', async ($, on) => {
   await ui.unmount()
 })
 
-test('이어가기 탭: 버튼이 그려져요', async ($, on) => {
+test('사용량 탭: 이어가기도 같은 탭에 있어요', async ($, on) => {
   const { clock } = stubSession(on)
   await start($, clock)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'tab-handoff' })
+  await ui.press({ key: 'tab-usage' })
+  // 이어가기 탭은 사용량 탭으로 합쳤어요. 그 자리에는 메일 탭이 들어갔어요.
+  expect(await ui.find({ key: 'tab-handoff' })).toBeUndefined()
+  expect(await ui.find({ key: 'tab-mail' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /새 대화로 이어가기/ })).toBeDefined()
   expect(await ui.find({ key: 'handoff-now' })).toBeDefined()
   expect(await ui.find({ key: 'handoff-mode' })).toBeDefined()
   await ui.unmount()
@@ -86,7 +90,43 @@ test('데스크톱 앱에서도 다섯 탭이 그려져요', async ($, on) => {
   const { clock } = stubSession(on)
   await start($, clock)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  for (const key of ['tab-usage', 'tab-handoff', 'tab-settings', 'tab-pin']) await ui.press({ key })
+  for (const key of ['tab-usage', 'tab-mail', 'tab-clip', 'tab-settings', 'tab-pin']) await ui.press({ key })
   expect(await ui.find({ type: 'Text', text: /내가 정해야 하는 것/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('소제목은 굵게 + 밑줄이고, 옆의 작은 글은 밑줄 없이 흐려요', async ($, on) => {
+  const { clock } = stubSession(on)
+  await start($, clock)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'tab-usage' })
+  for (const title of ['사용 한도', '대화 길이', '새 대화로 이어가기', '이 대화']) {
+    // 바깥 Text(자르기 담당)와 안쪽 Text(굵게·밑줄)가 같은 글을 가져요. 안쪽 것을 봐요.
+    const found = await ui.findAll({ type: 'Text', text: title })
+    expect(found.some(t => t.props.bold === true && t.props.underline === true)).toBe(true)
+  }
+  const side = await ui.findAll({ type: 'Text', text: /가득 차면 앞부분을 잊어요/ })
+  expect(side.some(t => t.props.dimColor === true && t.props.underline !== true)).toBe(true)
+  expect(side.some(t => t.props.underline === true)).toBe(false)
+  await ui.unmount()
+})
+
+test('창 너비에 맞춰 탭 이름을 줄여서 탭 줄이 한 줄에 들어가요', async ($, on) => {
+  const { clock } = stubSession(on)
+  await start($, clock)
+  const label = async (bodyColumns: number, key: string) => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns } })
+    const found = await ui.find({ key })
+    await ui.unmount()
+    return found?.props.label
+  }
+  // 넓으면 원래 이름
+  expect(await label(60, 'tab-clip')).toBe('클립보드')
+  expect(await label(60, 'tab-usage')).toBe('사용량')
+  // 44칸: «클립보드»만 «클립»으로
+  expect(await label(44, 'tab-clip')).toBe('클립')
+  expect(await label(44, 'tab-usage')).toBe('사용량')
+  // 40칸(옆 창 기본 너비): 가장 짧은 이름
+  expect(await label(40, 'tab-usage')).toBe('한도')
+  expect(await label(40, 'tab-pin')).toBe('할일')
 })

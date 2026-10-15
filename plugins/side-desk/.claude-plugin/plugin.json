@@ -1,6 +1,6 @@
 {
   "name": "side-desk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Claude Code 옆에 «책상»을 열어 줘요. 할 일 고정, 사용 한도, 대화 이어가기, 클립보드 기록, 보내기 전 확인.",
   "author": { "name": "daniel.kim" },
   "license": "MIT",

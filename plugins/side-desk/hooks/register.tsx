@@ -2,16 +2,17 @@ import type { EngineInterface, Register } from 'claude-code'
 import {
   CLIP_LIST_SCRIPT, CLIP_SCRIPT, CLIP_WATCH_SCRIPT, COACH_SKIP, COACH_SYSTEM, WINDOW_LABEL, clipInsertText, clipItemScript, clipRowText, parseClip, parseClipList,
   applyUpdate, assembleBrief, bar, briefPrompt, burn, describeBoard, extractFacts,
-  hoursText, isValidBrief, k, keptShare, parseVerdict, recentTurns, seedText, untilText,
+  cellWidth, hoursText, isValidBrief, k, keptShare, padCells, parseVerdict, recentTurns, seedText, untilText,
+  GMAIL_SERVER, MAIL_PAGE, mailAccount, mailActionPrompt, mailTime, mcpErrorText, mcpJson, parseThread, parseThreadList, safeMailUrl, senderName,
 } from './lib.ts'
-import type { Board, Clip, ClipItem, Decision, Todo, Update, UsageWindow, Verdict } from './lib.ts'
+import type { Board, Clip, ClipItem, Decision, MailRow, MailThread, Todo, Update, UsageWindow, Verdict } from './lib.ts'
 import { judgeSend, summarizeArgs } from './send-check.ts'
 import { MIRRORED_TOOLS, mirrorTool, trailingQuestion, withAutoDecision } from './mirror.ts'
 
 // side-desk: Claude Code 옆에 «책상» 하나를 열어 줘요.
-//  · 핀      : 이번 대화의 할 일과, 내가 정해야 하는 것을 옆에 고정해 둬요
-//  · 사용    : 사용 한도와 대화 길이, 비용을 한눈에
-//  · 인계    : 대화가 길어지면 이어가기 메모를 쓰고 새 대화로 넘겨요 (인터넷 전송·웹 서버 없음)
+//  · 할 일   : 이번 대화의 할 일과, 내가 정해야 하는 것을 옆에 고정해 둬요
+//  · 사용량  : 사용 한도와 대화 길이, 비용을 한눈에. 대화가 길어지면 이어가기 메모를 쓰고 새 대화로 넘겨요 (인터넷 전송·웹 서버 없음)
+//  · 메일    : 연결된 Gmail 받은편지함의 제목 목록, 고르면 본문 (읽기만)
 //  · 클립    : 윈도우 클립보드 기록을 보고 입력창에 바로 붙여요
 //  · 설정    : 발송 전 확인 · 알림 · 프롬프트 가이드
 // 화면이 있는 세션에서만 묻고 움직여요. SIDE_DESK_OFF=1 이면 전부 꺼요.
@@ -20,7 +21,7 @@ const PANE = 'side-desk'
 const TOOL = 'mcp__side-desk__pin'
 const BRIEF_DIR = '.claude/state/side-desk/briefs'
 
-type TabName = 'pin' | 'usage' | 'handoff' | 'clip' | 'settings'
+type TabName = 'pin' | 'usage' | 'mail' | 'clip' | 'settings'
 type Mode = 'ask' | 'auto' | 'off'
 type Snapshot = {
   windows: UsageWindow[]
@@ -112,6 +113,19 @@ let clipNote: string | undefined
 let clipBusy = false
 let clipSig = ''
 let clipWatching = false
+// 메일: «메일» 탭을 열 때, «새로고침»을 누를 때, 메일 탭을 보고 있는 동안 5분마다 Gmail 커넥터를 불러요.
+//  · 창이 닫혀 있거나 다른 탭을 보고 있으면 부르지 않아요. 따로 저장하지 않고 읽기만 해요.
+//  · 목록은 제목만 보여 주고, 줄을 누르면 그 메일의 본문을 불러와요.
+let mailState: 'idle' | 'loading' | 'ok' | 'failed' = 'idle'
+let mailRows: MailRow[] = []
+let mailAt = 0
+let mailWho = '' // 연결된 계정 주소(메일 링크의 authuser)
+let mailProblem: string | undefined
+let mailView: MailThread | undefined // 지금 펼쳐 둔 메일
+let mailOpening: string | undefined // 본문을 불러오는 중인 스레드
+let mailNote: string | undefined // 본문을 못 불러온 이유
+const MAIL_STALE_MS = 2 * 60_000
+const MAIL_AUTO_MS = 5 * 60_000
 // 이어가기로 시작한 대화와, 그 대화의 시작 크기(토큰)
 let seededSession: string | undefined
 let seedFloor: number | undefined
@@ -336,6 +350,7 @@ async function autoOpenDesk($: EngineInterface) {
     await refreshUsage($)
     updateStatus($)
     if (tab === 'clip') void watchClipboard($)
+    if (tab === 'mail') void mailOnTab($)
     const opened = await $.ui.open({ id: PANE, title: '책상', columns: cfg.paneColumns, closeOnEscape: true })
     if (opened && opened.isPlaced === false) {
       // 저절로 연 창은 터미널이 144칸 미만이면 그려지지 않고 기다려요. 이유를 보여 줘요.
@@ -528,6 +543,98 @@ async function deskText($: EngineInterface): Promise<string> {
   return lines.join('\n')
 }
 
+// ───────────── 메일 (claude.ai Gmail 커넥터, 읽기만) ─────────────
+
+// 받은편지함 최근 메일의 제목을 읽어요. 연결이 안 돼 있거나 로그인이 풀렸으면 이유를 남겨요.
+//  · quiet: 저절로 다시 읽을 때예요. 실패해도 오류 화면으로 바꾸지 않고 보던 목록을 그대로 둬요.
+async function loadMailList($: EngineInterface, opts: { quiet?: boolean } = {}): Promise<void> {
+  if (mailState === 'loading') return
+  const quiet = opts.quiet === true && mailState === 'ok'
+  mailState = 'loading'
+  $.ui.invalidate('ui.render')
+  try {
+    const r = await $.mcp.call(GMAIL_SERVER, 'search_threads', { query: 'in:inbox', pageSize: MAIL_PAGE, view: 'THREAD_VIEW_MINIMAL' })
+    const data = r.isError ? undefined : mcpJson(r)
+    if (data === undefined) {
+      mailState = quiet ? 'ok' : 'failed'
+      if (!quiet) mailProblem = r.isError ? mcpErrorText(r) : 'Gmail 답을 읽지 못했어요'
+      return
+    }
+    mailRows = parseThreadList(data)
+    const firstUrl = (data as { threads?: { viewUrl?: unknown }[] }).threads?.[0]?.viewUrl
+    mailWho = mailAccount(typeof firstUrl === 'string' ? firstUrl : undefined) || mailWho
+    mailState = 'ok'
+    mailProblem = undefined
+  } catch (err) {
+    mailState = quiet ? 'ok' : 'failed'
+    if (!quiet) mailProblem = String(err).replace(/\s+/g, ' ').slice(0, 160)
+  } finally {
+    mailAt = await $.clock.now()
+    $.ui.invalidate('ui.render')
+  }
+}
+
+// 탭을 열 때: 처음이거나, 실패했거나, 2분 넘게 지난 목록이면 다시 읽어요.
+async function mailOnTab($: EngineInterface) {
+  const now = await $.clock.now()
+  if (mailState === 'idle' || mailState === 'failed' || (mailState === 'ok' && now - mailAt > MAIL_STALE_MS)) await loadMailList($)
+}
+
+// 1분마다 불려요. 옆 창이 보이고 «메일» 탭을 보고 있을 때만, 읽은 지 5분이 지났으면 목록을 다시 읽어요.
+//  · 실패한 상태(연결 안 됨·권한 없음)에서는 저절로 다시 부르지 않아요. «다시 시도»를 누르면 돼요.
+async function mailTick($: EngineInterface) {
+  if (tab !== 'mail' || mailState !== 'ok') return
+  if ((await $.clock.now()) - mailAt < MAIL_AUTO_MS) return
+  const panes = await $.ui.panes().catch(() => [])
+  if (!panes.some(p => p.id === PANE && p.isShown && p.isPlaced)) return
+  await loadMailList($, { quiet: true })
+}
+
+// 줄을 누르면 그 메일(스레드)의 본문을 불러와요. Gmail 의 «읽음» 표시는 바꾸지 않아요.
+async function openMail($: EngineInterface, row: MailRow): Promise<void> {
+  if (mailOpening) return
+  mailOpening = row.id
+  mailNote = undefined
+  $.ui.invalidate('ui.render')
+  try {
+    const r = await $.mcp.call(GMAIL_SERVER, 'get_thread', { threadId: row.id, messageFormat: 'PLAIN_TEXT' })
+    const t = r.isError ? undefined : parseThread(mcpJson(r))
+    if (!t) {
+      mailNote = `본문을 못 불러왔어요: ${r.isError ? mcpErrorText(r) : '답을 읽지 못했어요'}`
+      return
+    }
+    mailView = t
+    $.ui.scroll({ in: PANE, to: 'start' }).catch(() => {})
+  } catch (err) {
+    mailNote = `본문을 못 불러왔어요: ${String(err).replace(/\s+/g, ' ').slice(0, 120)}`
+  } finally {
+    mailOpening = undefined
+    $.ui.invalidate('ui.render')
+  }
+}
+
+// 연결하기: /mcp 창을 열어요. 거기서 «claude.ai Gmail»을 골라 로그인해요.
+function connectGmail($: EngineInterface) {
+  $.command.run({ command: 'mcp' }).catch((err: unknown) => {
+    $.ui.toast(`/mcp 창을 열지 못했어요. 입력창에 /mcp 를 직접 쳐 주세요. (${String(err).slice(0, 80)})`, { timeoutMs: 10000 })
+  })
+}
+
+// 펼친 메일을 브라우저의 Gmail 로 열어요. 누를 때만 PowerShell 을 한 번 띄워요.
+async function openMailInBrowser($: EngineInterface, url: string | undefined) {
+  const safe = safeMailUrl(url)
+  const ps = await powershellFor($)
+  if (!safe || !ps) {
+    $.ui.toast('이 메일은 브라우저로 열 수 없어요.', { timeoutMs: 5000 })
+    return
+  }
+  try {
+    await $.process.run([ps, '-NoProfile', '-WindowStyle', 'Hidden', '-Command', `Start-Process '${safe}'`], { timeoutMs: 15000 })
+  } catch (err) {
+    $.ui.toast(`브라우저를 열지 못했어요: ${String(err).slice(0, 100)}`, { timeoutMs: 6000 })
+  }
+}
+
 // ───────────── 이어가기(인수인계) ─────────────
 
 async function writeBrief($: EngineInterface, sessionId: string, tokens: number): Promise<{ path: string; problem?: string }> {
@@ -661,12 +768,17 @@ async function coachReview($: EngineInterface, prompt: string): Promise<Verdict 
 
 type Els = { Box: any; Text: any; Button: any }
 
+// 소제목: 굵게 + 밑줄로 본문과 구분하고, 아래에 한 줄을 띄워요. 옆의 작은 글(개수·기준)은 흐리게, 밑줄 없이.
+// 색은 쓰지 않아요(경고 색과 섞이면 지저분해져요).
 function heading(els: Els, title: string, count?: string) {
-  const { Text } = els
+  const { Box, Text } = els
   return (
-    <Text bold>
-      {title} <Text dimColor>{count ?? ''}</Text>
-    </Text>
+    <Box paddingBottom={1} flexShrink={1}>
+      <Text wrap="truncate-end">
+        <Text bold underline>{title}</Text>
+        <Text dimColor>{count ? ' ' + count : ''}</Text>
+      </Text>
+    </Box>
   )
 }
 
@@ -678,6 +790,17 @@ function line(els: Els, inner: number, bullet: string, text: string, opts: { dim
       <Box flexShrink={1} flexGrow={1}>
         <Text dimColor={opts.dim} color={opts.color} wrap="wrap">{text}</Text>
       </Box>
+    </Box>
+  )
+}
+
+// 여러 줄로 넘어가는 설명. 들여쓰기를 빈칸 글자가 아니라 여백으로 줘서, 넘어간 줄도 같은 자리에서 시작해요.
+// (빈칸 글자로 들여 쓰면 둘째 줄부터 맨 왼쪽으로 붙어요)
+function para(els: Els, inner: number, text: string, opts: { indent?: number; dim?: boolean; color?: string } = {}) {
+  const { Box, Text } = els
+  return (
+    <Box paddingLeft={opts.indent ?? 2} width={inner}>
+      <Text dimColor={opts.dim} color={opts.color} wrap="wrap">{text}</Text>
     </Box>
   )
 }
@@ -702,7 +825,37 @@ function pinTab(els: Els, inner: number) {
   )
 }
 
-function usageTab(els: Els, inner: number) {
+type HandoffHandlers = { now: () => void; cycle: () => void }
+
+// 새 대화로 이어가기. 사용량 탭의 «대화 길이» 막대 바로 아래에 붙어요(같은 막대를 두 번 그리지 않으려고 탭을 합쳤어요).
+function handoffBlock(els: Els, act: HandoffHandlers) {
+  const { Box, Text, Button } = els
+  // 토큰 수는 어려운 말이라, 창의 몇 %쯤인지로 풀어서 보여 줘요.
+  const triggerPct = snap?.ctxWindow ? Math.min(cfg.handoffPercent, Math.round((cfg.handoffTokens / snap.ctxWindow) * 100)) : cfg.handoffPercent
+  return (
+    <Box flexDirection="column">
+      <Text> </Text>
+      {heading(els, '새 대화로 이어가기')}
+      <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+        <Text>{`  방식  ${MODE_LABEL[mode]}`}</Text>
+        <Button key="handoff-mode" label="바꾸기" hotkey="m" plain onPress={act.cycle} />
+      </Box>
+      <Text dimColor wrap="truncate-end">{`  기준  대화가 ${triggerPct}%쯤 차면`}</Text>
+      <Box flexDirection="row" paddingLeft={2} paddingTop={1}>
+        <Button key="handoff-now" label="지금 넘기기" hotkey="n" onPress={act.now} />
+      </Box>
+      {lastBrief !== undefined && (
+        <Box flexDirection="column" paddingTop={1}>
+          <Text dimColor wrap="truncate-middle">{'  마지막 메모 ' + lastBrief.path}</Text>
+          <Text dimColor>{`  ${hhmm(lastBrief.at)}${lastBrief.problem ? ' · 요약 없이 사실만' : ''}`}</Text>
+        </Box>
+      )}
+      <Text dimColor>{'  메모는 내 컴퓨터에만 저장돼요'}</Text>
+    </Box>
+  )
+}
+
+function usageTab(els: Els, inner: number, act: HandoffHandlers) {
   const { Box, Text } = els
   const barWidth = Math.max(8, Math.min(24, inner - 22))
   const stat = (label: string, value: string, color?: string) => (
@@ -717,7 +870,8 @@ function usageTab(els: Els, inner: number) {
     return (
       <Box flexDirection="column" width={inner + 2} padding={1}>
         {heading(els, '사용량')}
-        <Text dimColor>{'  아직 못 읽었어요. 한 번 대화를 주고받으면 채워져요.'}</Text>
+        {para(els, inner, '아직 못 읽었어요. 한 번 대화를 주고받으면 채워져요.', { dim: true })}
+        {handoffBlock(els, act)}
       </Box>
     )
   }
@@ -726,14 +880,14 @@ function usageTab(els: Els, inner: number) {
   return (
     <Box flexDirection="column" width={inner + 2} padding={1}>
       {heading(els, '사용 한도')}
-      {snap.windows.length === 0 && <Text dimColor>{'  한도 정보가 없어요. (한도가 없는 요금제예요)'}</Text>}
+      {snap.windows.length === 0 && para(els, inner, '한도 정보가 없어요. (한도가 없는 요금제예요)', { dim: true })}
       {snap.windows.map(w => {
         const b = burn(w, baseline, now)
         const pct = Math.round(w.percentUsed)
         return (
           <Box flexDirection="column">
             <Text>
-              {'  ' + (WINDOW_LABEL[w.kind] ?? w.kind).padEnd(6) + ' '}
+              {'  ' + padCells(WINDOW_LABEL[w.kind] ?? w.kind, 6) + ' '}
               <Text color={tone(w.percentUsed) ?? 'claude'}>{bar(w.percentUsed, barWidth)}</Text>
               <Text color={tone(w.percentUsed)}>{` ${pct}%`}</Text>
             </Text>
@@ -754,6 +908,7 @@ function usageTab(els: Els, inner: number) {
       ) : (
         <Text dimColor>{'  아직 못 읽었어요.'}</Text>
       )}
+      {handoffBlock(els, act)}
       <Text> </Text>
       {heading(els, '이 대화')}
       {stat('비용', snap.costUsd !== null ? `$${snap.costUsd.toFixed(2)}` : '알 수 없음')}
@@ -763,45 +918,105 @@ function usageTab(els: Els, inner: number) {
   )
 }
 
-type HandoffHandlers = { now: () => void; cycle: () => void }
+// ask = «>» 조치사항 찾기 프롬프트를 입력창에 넣기 · browser = Gmail 에서 열기
+type MailHandlers = { open: (row: MailRow) => void; back: () => void; refresh: () => void; connect: () => void; ask: (m: { id: string; subject: string; from: string; date: string }) => void; browser: (url: string | undefined) => void }
 
-function handoffTab(els: Els, inner: number, act: HandoffHandlers) {
+function mailTab(els: Els, inner: number, now: number, act: MailHandlers) {
   const { Box, Text, Button } = els
-  const barWidth = Math.max(8, Math.min(24, inner - 22))
-  const pct = snap?.ctxPercent
-  // 토큰 수는 어려운 말이라, 창의 몇 %쯤인지로 풀어서 보여 줘요.
-  const triggerPct = snap?.ctxWindow ? Math.min(cfg.handoffPercent, Math.round((cfg.handoffTokens / snap.ctxWindow) * 100)) : cfg.handoffPercent
+  // 펼친 메일: 최신 메일이 위, 본문은 옆 창에서 스크롤해서 봐요.
+  if (mailView !== undefined) {
+    const v = mailView
+    return (
+      <Box flexDirection="column" width={inner + 2} padding={1}>
+        <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+          <Button key="mail-back" label="← 목록" hotkey="b" plain onPress={act.back} />
+          <Button
+            key="mail-ask"
+            label="> 조치사항"
+            hotkey="i"
+            plain
+            onPress={() => act.ask({ id: v.id, subject: v.subject, from: v.messages[0]?.from ?? '', date: v.messages[0]?.date ?? '' })}
+          />
+          {safeMailUrl(v.url) !== undefined && <Button key="mail-browser" label="↗ Gmail" hotkey="o" plain dimColor onPress={() => act.browser(v.url)} />}
+        </Box>
+        <Text> </Text>
+        <Text bold wrap="wrap">{v.subject}</Text>
+        {v.total > 1 && <Text dimColor wrap="truncate-end">{`${v.total}통 · 최신부터` + (v.total > v.messages.length ? ` · 앞의 ${v.total - v.messages.length}통은 Gmail에서` : '')}</Text>}
+        {v.messages.map((m, i) => (
+          <Box flexDirection="column" paddingTop={1}>
+            <Text color={i === 0 ? 'claude' : undefined} dimColor={i > 0} wrap="truncate-end">{`${senderName(m.from)} · ${mailTime(m.date, now)}`}</Text>
+            <Text wrap="wrap" dimColor={i > 0}>{m.body || '(본문 없음)'}</Text>
+            {m.cut && <Text dimColor>{'… 길어서 잘랐어요. 나머지는 Gmail에서 보세요.'}</Text>}
+          </Box>
+        ))}
+      </Box>
+    )
+  }
+
+  const head = heading(els, '메일')
+  // 연결은 돼 있는데 도구 권한을 안 받은 경우(권한 묻기를 건너뛰지 않는 세션). 이때는 다시 연결해도 소용없어요.
+  if (mailState === 'failed' && /permission|권한/i.test(mailProblem ?? '')) {
+    return (
+      <Box flexDirection="column" width={inner + 2} padding={1}>
+        {head}
+        {para(els, inner, 'Gmail은 연결돼 있는데, 메일을 읽는 권한을 아직 안 받았어요.', { color: 'warning' })}
+        {para(els, inner, '/permissions 에서 mcp__claude_ai_Gmail__search_threads 와 mcp__claude_ai_Gmail__get_thread 를 허용한 뒤 «다시 시도»를 누르세요.', { dim: true })}
+        <Box flexDirection="row" paddingLeft={2} paddingTop={1}>
+          <Button key="mail-refresh" label="다시 시도" hotkey="r" onPress={act.refresh} />
+        </Box>
+      </Box>
+    )
+  }
+  if (mailState === 'failed') {
+    return (
+      <Box flexDirection="column" width={inner + 2} padding={1}>
+        {head}
+        {para(els, inner, 'Gmail을 불러오지 못했어요. 연결이 안 돼 있거나 로그인이 풀렸을 수 있어요.', { color: 'warning' })}
+        {mailProblem !== undefined && para(els, inner, mailProblem, { dim: true })}
+        <Box flexDirection="row" columnGap={2} paddingLeft={2} paddingTop={1}>
+          <Button key="mail-connect" label="연결하기" hotkey="c" variant="primary" onPress={act.connect} />
+          <Button key="mail-refresh" label="다시 시도" hotkey="r" onPress={act.refresh} />
+        </Box>
+        <Text> </Text>
+        {para(els, inner, '연결하기를 누르면 /mcp 창이 열려요. «claude.ai Gmail»을 골라 로그인한 뒤 «다시 시도»를 누르세요.', { dim: true })}
+        {para(els, inner, '목록에 Gmail이 없으면 claude.ai 설정 > 커넥터에서 먼저 추가하세요.', { dim: true })}
+      </Box>
+    )
+  }
+
+  const timeWidth = 5
   return (
     <Box flexDirection="column" width={inner + 2} padding={1}>
-      {heading(els, '새 대화로 이어가기', '대화가 너무 길어질 때')}
-      <Text> </Text>
-      <Box flexDirection="row" columnGap={2}>
-        <Text>{`  방식  ${MODE_LABEL[mode]}`}</Text>
-        <Button key="handoff-mode" label="바꾸기" hotkey="m" plain onPress={act.cycle} />
+      <Box flexDirection="row" justifyContent="space-between" width={inner}>
+        {head}
+        <Button key="mail-refresh" label="새로고침" hotkey="r" plain dimColor onPress={act.refresh} />
       </Box>
-      <Text dimColor>{`  기준  대화가 ${triggerPct}%쯤 차면`}</Text>
-      <Text> </Text>
-      <Text>
-        {'  지금  '}
-        <Text color="claude">{bar(pct ?? 0, barWidth)}</Text>
-        {pct !== undefined ? ` ${Math.round(pct)}%` : ' ?'}
-      </Text>
-      <Text> </Text>
-      <Box flexDirection="row" paddingLeft={2}>
-        <Button key="handoff-now" label="지금 넘기기" hotkey="n" onPress={act.now} />
-      </Box>
-      <Text> </Text>
-      {heading(els, '마지막 이어가기 메모')}
-      {lastBrief === undefined ? (
-        <Text dimColor>{'  없음'}</Text>
-      ) : (
-        <Box flexDirection="column">
-          <Text dimColor wrap="truncate-middle">{'  ' + lastBrief.path}</Text>
-          <Text dimColor>{`  ${hhmm(lastBrief.at)}${lastBrief.problem ? ' · 요약 없이 사실만' : ''}`}</Text>
+      {mailWho !== '' && <Text dimColor wrap="truncate-end">{'  ' + mailWho}</Text>}
+      {mailState === 'loading' && mailRows.length === 0 && <Text dimColor>{'  불러오는 중…'}</Text>}
+      {mailState === 'idle' && <Text dimColor>{'  잠깐만요…'}</Text>}
+      {mailState === 'ok' && mailRows.length === 0 && <Text dimColor>{'  받은편지함이 비어 있어요.'}</Text>}
+      {mailOpening !== undefined && <Text color="claude">{'  본문을 불러오는 중…'}</Text>}
+      {mailNote !== undefined && para(els, inner, mailNote, { color: 'warning' })}
+      {mailRows.map(r => (
+        <Box flexDirection="row" width={inner} columnGap={1}>
+          <Button key={'mail-' + r.id} label={r.unread ? '●' : '○'} plain dimColor={!r.unread} onPress={() => act.open(r)} />
+          <Box flexShrink={1} flexGrow={1}>
+            <Text bold={r.unread} dimColor={!r.unread} wrap="truncate-end">{r.subject + (r.count > 1 ? ` (${r.count})` : '')}</Text>
+          </Box>
+          <Box flexDirection="row" flexShrink={0} columnGap={1}>
+            <Text dimColor>{mailTime(r.date, now).padStart(timeWidth)}</Text>
+            <Button key={'mail-ask-' + r.id} label=">" plain onPress={() => act.ask(r)} />
+            {safeMailUrl(r.url) !== undefined ? (
+              <Button key={'mail-web-' + r.id} label="↗" plain dimColor onPress={() => act.browser(r.url)} />
+            ) : (
+              <Text> </Text>
+            )}
+          </Box>
         </Box>
-      )}
+      ))}
       <Text> </Text>
-      <Text dimColor>{'  메모는 내 컴퓨터에만 저장돼요'}</Text>
+      {para(els, inner, '●○ 본문 · > 조치사항 · ↗ Gmail', { dim: true })}
+      {para(els, inner, (mailAt ? `${hhmm(mailAt)} 기준 · ` : '') + '읽기만 해요', { dim: true })}
     </Box>
   )
 }
@@ -813,7 +1028,7 @@ function settingsTab(els: Els, inner: number, act: SettingsHandlers) {
   const onoff = (v: boolean) => (v ? '켜짐' : '꺼짐')
   const tone: Record<SendEntry['kind'], string | undefined> = { allow: undefined, refuse: 'warning', unattended: 'error' }
   const toggle = (label: string, value: boolean, key: string, hotkey: string, onPress: () => void) => (
-    <Box flexDirection="row" columnGap={2}>
+    <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
       <Text>{`  ${label} ${onoff(value)}`}</Text>
       <Button key={key} label={value ? '끄기' : '켜기'} hotkey={hotkey} onPress={onPress} />
     </Box>
@@ -822,11 +1037,13 @@ function settingsTab(els: Els, inner: number, act: SettingsHandlers) {
     <Box flexDirection="column" width={inner + 2} padding={1}>
       {heading(els, '설정')}
       {toggle('발송 전 확인', sendConfirmOn, 'toggle-send', 's', act.send)}
-      <Text dimColor wrap="wrap">{'    메일·광고·일정·공유처럼 바깥으로 나가는 일은 보내기 전에 내용을 보여 주고 물어요.'}</Text>
+      {para(els, inner, '메일·광고·일정·공유처럼 바깥으로 나가는 일은 보내기 전에 내용을 보여 주고 물어요.', { indent: 4, dim: true })}
+      <Text> </Text>
       {toggle('알림', notifyOn, 'toggle-notify', 'n', act.notify)}
-      <Text dimColor wrap="wrap">{`    ${cfg.notifyMinSeconds}초 넘게 걸린 일이 끝나면 윈도우 알림을 띄워요.`}</Text>
+      {para(els, inner, `${cfg.notifyMinSeconds}초 넘게 걸린 일이 끝나면 윈도우 알림을 띄워요.`, { indent: 4, dim: true })}
+      <Text> </Text>
       {toggle('프롬프트 가이드', coachOn, 'toggle-coach', 'c', act.coach)}
-      <Text dimColor wrap="wrap">{'    흐릿한 요청이면 고쳐 줘요 · 켜면 작은 모델을 한 번 더 써요'}</Text>
+      {para(els, inner, '흐릿한 요청이면 고쳐 줘요 · 켜면 작은 모델을 한 번 더 써요', { indent: 4, dim: true })}
       <Text> </Text>
       {heading(els, '최근 발송 확인', sendLog.length ? String(sendLog.length) : '')}
       {sendLog.length === 0 && <Text dimColor>{'  아직 없어요.'}</Text>}
@@ -843,7 +1060,7 @@ function clipTab(els: Els, inner: number, act: ClipHandlers) {
   return (
     <Box flexDirection="column" width={inner + 2} padding={1}>
       {heading(els, '클립보드', clipAt ? `${hhmm(clipAt)} 기준` : '')}
-      {clipNote !== undefined && <Text dimColor wrap="wrap">{'  ' + clipNote}</Text>}
+      {clipNote !== undefined && para(els, inner, clipNote, { dim: true })}
       {rows.length === 0 && clipNote === undefined && <Text dimColor>{clipBusy || clipAt === 0 ? '  읽는 중…' : '  비어 있어요.'}</Text>}
       {rows.map((it, i) => (
         <Box flexDirection="row" width={inner} columnGap={1}>
@@ -854,15 +1071,33 @@ function clipTab(els: Els, inner: number, act: ClipHandlers) {
         </Box>
       ))}
       <Text> </Text>
-      <Box flexDirection="row" columnGap={2}>
+      <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
         <Button key="clip-paste" label="최신 것 붙이기" hotkey="p" variant="primary" onPress={act.paste} />
         <Button key="clip-refresh" label="새로 읽기" hotkey="r" onPress={act.refresh} />
       </Box>
       <Text> </Text>
-      <Text dimColor>{'  ▶ ▷ 누르면 입력창에 넣어요 · 목록은 Win+V 기록'}</Text>
-      <Text dimColor wrap="wrap">{'  복사한 비밀번호도 보일 수 있어요'}</Text>
+      {para(els, inner, '▶ ▷ 누르면 입력창에 넣어요 · 목록은 Win+V 기록', { dim: true })}
+      {para(els, inner, '복사한 비밀번호도 보일 수 있어요', { dim: true })}
     </Box>
   )
+}
+
+// 탭 이름은 넓을 때·보통·좁을 때 세 벌. 탭 줄이 한 줄에 들어가는 가장 긴 벌을 골라요.
+const TABS: { name: TabName; hotkey: string; labels: [string, string, string] }[] = [
+  { name: 'pin', hotkey: '1', labels: ['할 일', '할 일', '할일'] },
+  { name: 'usage', hotkey: '2', labels: ['사용량', '사용량', '한도'] },
+  { name: 'mail', hotkey: '3', labels: ['메일', '메일', '메일'] },
+  { name: 'clip', hotkey: '4', labels: ['클립보드', '클립', '클립'] },
+  { name: 'settings', hotkey: '5', labels: ['설정', '설정', '설정'] },
+]
+
+// 단추 하나는 «1: 이름»(3칸 + 이름)이고 단추 사이는 한 칸이에요. room = 탭 줄에 쓸 수 있는 칸 수.
+export function tabLabelSet(room: number): 0 | 1 | 2 {
+  for (const i of [0, 1] as const) {
+    const w = TABS.reduce((sum, t) => sum + 3 + cellWidth(t.labels[i]), 0) + (TABS.length - 1)
+    if (w <= room) return i
+  }
+  return 2
 }
 
 // ───────────── 등록 ─────────────
@@ -912,9 +1147,12 @@ export const register: Register = (on, options) => {
     await loadBoard($)
     await $.tool.register({ name: 'pin', description: DESCRIPTION, inputSchema: SCHEMA })
     void refreshUsage($).then(() => updateStatus($))
-    $.clock.every(60_000, () => void refreshUsage($).then(() => updateStatus($)))
+    $.clock.every(60_000, () => {
+      void refreshUsage($).then(() => updateStatus($))
+      void mailTick($)
+    })
     // 명령어는 이름이 겹치면 던지니까 맨 뒤에서, 하나씩 감싸서 등록해요.
-    await registerCommand($, { name: 'desk', description: '책상 열기: 핀·사용·이어가기·클립·설정. text 를 붙이면 글로 보여 줘요', argumentHint: '[text]', immediate: true })
+    await registerCommand($, { name: 'desk', description: '책상 열기: 할 일·사용량(이어가기 포함)·메일·클립·설정. text 를 붙이면 글로 보여 줘요', argumentHint: '[text]', immediate: true })
     await registerCommand($, { name: 'coach', description: '프롬프트 가이드 켜기·끄기', argumentHint: '[on|off]' })
     await registerCommand($, { name: 'handoff', description: '대화를 새 대화로 넘겨요', argumentHint: '[now|ask|auto|off]', immediate: true })
     await registerCommand($, { name: 'clip', description: '클립보드의 글을 입력창에 붙여요. 이미지는 파일로 저장하고 경로를 붙여요', immediate: true })
@@ -926,8 +1164,9 @@ export const register: Register = (on, options) => {
     openedByUser = true // 내가 직접 연 창은 입력창 위에 열려도 닫지 않아요.
     await refreshUsage($)
     updateStatus($)
-    // 창을 다시 열었는데 «클립» 탭이 선택돼 있으면 바로 읽어요.
+    // 창을 다시 열었는데 «클립» 탭이 선택돼 있으면 바로 읽어요. «메일» 탭이면 받은편지함 제목을 읽어요.
     if (tab === 'clip') void watchClipboard($)
+    if (tab === 'mail') void mailOnTab($)
     await $.ui.open({ id: PANE, title: '책상', columns: cfg.paneColumns, focus: true, closeOnEscape: true })
     return {}
   })
@@ -1046,7 +1285,9 @@ export const register: Register = (on, options) => {
     const els = $.ui.resolve(e)
     const { Box, Button, Text } = els
     const inner = Math.max(10, (e.props.bodyColumns ?? 40) - 2)
+    const now = await $.clock.now()
     const redraw = () => $.ui.invalidate('ui.render')
+    const labelSet = tabLabelSet(inner + 1)
     // 옆이 아니라 입력창 위에 열렸다면(클래식 화면) 마우스가 안 눌려요. 클릭은 풀스크린 화면에서만 와요.
     const inline = e.props.placement === 'inline'
     const unfocused = e.props.isFocused === false
@@ -1075,8 +1316,9 @@ export const register: Register = (on, options) => {
         onPress={() => {
           tab = name
           redraw()
-          // 클립 탭은 열 때 감시를 시작해요.
+          // 클립 탭은 열 때 감시를 시작해요. 메일 탭은 열 때 받은편지함 제목을 읽어요.
           if (name === 'clip') void watchClipboard($)
+          if (name === 'mail') void mailOnTab($)
         }}
       />
     )
@@ -1084,7 +1326,31 @@ export const register: Register = (on, options) => {
       tab === 'pin'
         ? pinTab(els, inner)
         : tab === 'usage'
-          ? usageTab(els, inner)
+          ? usageTab(els, inner, {
+              now: () => void startHandoff($, true),
+              cycle: () => {
+                mode = nextMode(mode)
+                void $.store.set('mode', mode)
+                redraw()
+              },
+            })
+          : tab === 'mail'
+            ? mailTab(els, inner, now, {
+                open: (row: MailRow) => void openMail($, row),
+                back: () => {
+                  mailView = undefined
+                  redraw()
+                },
+                refresh: () => void loadMailList($),
+                connect: () => connectGmail($),
+                // 입력창을 이 글로 채우기만 해요. 보내기는 엔터로 해요.
+                ask: m => {
+                  void $.prompt.fill({ text: mailActionPrompt(m) }).then(r => {
+                    $.ui.toast(r.isFilled ? '입력창에 넣었어요. Esc로 입력창에 돌아가 엔터를 누르면 시작해요.' : '입력창에 못 넣었어요.', { timeoutMs: 6000 })
+                  })
+                },
+                browser: url => void openMailInBrowser($, url),
+              })
           : tab === 'clip'
             ? clipTab(els, inner, {
                 paste: () => {
@@ -1094,8 +1360,7 @@ export const register: Register = (on, options) => {
                 refresh: () => void readClipList($).then(redraw),
                 pick: (item: ClipItem) => void pasteItem($, item),
               })
-            : tab === 'settings'
-              ? settingsTab(els, inner, {
+            : settingsTab(els, inner, {
                   send: () => {
                     sendConfirmOn = !sendConfirmOn
                     void $.store.set('sendConfirm', sendConfirmOn)
@@ -1112,22 +1377,10 @@ export const register: Register = (on, options) => {
                     redraw()
                   },
                 })
-              : handoffTab(els, inner, {
-                  now: () => void startHandoff($, true),
-                  cycle: () => {
-                    mode = nextMode(mode)
-                    void $.store.set('mode', mode)
-                    redraw()
-                  },
-                })
     return (
       <Box flexDirection="column" width={inner + 2}>
-        <Box flexDirection="row" flexWrap="wrap" columnGap={2} paddingLeft={1}>
-          {tabBtn('pin', '할 일', '1')}
-          {tabBtn('usage', '사용량', '2')}
-          {tabBtn('handoff', '이어가기', '3')}
-          {tabBtn('clip', '클립보드', '4')}
-          {tabBtn('settings', '설정', '5')}
+        <Box flexDirection="row" flexWrap="wrap" columnGap={1} paddingLeft={1}>
+          {TABS.map(t => tabBtn(t.name, t.labels[labelSet], t.hotkey))}
         </Box>
         {notice}
         {body}

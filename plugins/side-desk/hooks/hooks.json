@@ -1,4 +1,4 @@
 {
-  "description": "side-desk: 핀 · 사용 · 이어가기 · 클립 · 설정",
+  "description": "side-desk: 할 일 · 사용량과 이어가기 · 메일 · 클립 · 설정",
   "modules": ["./register.tsx"]
 }

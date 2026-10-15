@@ -47,6 +47,12 @@ export function describeBoard(board: Board): string {
 export type UsageWindow = { kind: string; percentUsed: number; resetsAt?: string }
 export const WINDOW_LABEL: Record<string, string> = { five_hour: '5시간', seven_day: '7일', spend_limit: '지출 한도' }
 
+/** 터미널에서 차지하는 칸 수. 한글·한자·전각 글자는 두 칸이에요. */
+const WIDE = /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]/
+export const cellWidth = (s: string) => [...s].reduce((w, ch) => w + (WIDE.test(ch) ? 2 : 1), 0)
+/** 칸 수로 오른쪽을 채워요. (padEnd 는 글자 수로 채워서 한글이 섞이면 줄이 어긋나요) */
+export const padCells = (s: string, cells: number) => s + ' '.repeat(Math.max(0, cells - cellWidth(s)))
+
 export const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)))
 
 export const bar = (percent: number, width: number) => {
@@ -186,7 +192,7 @@ export function briefPrompt(messages: readonly Msg[], facts: Facts, board: Board
     `- 쉬운 입말로 짧게 쓴다. (~했어요, ~해야 해요) 번역투와 영어식 문장은 쓰지 않는다.\n` +
     `- "사용자에게 받아야 할 답"에는 사용자가 아직 답하지 않은 질문과 승인만 쓴다.\n` +
     `- "해 봤는데 막힌 길"에는 시도했다가 안 된 방법과 그 이유를 쓴다. 새 대화가 같은 길을 가지 않게 하려는 칸이다.\n` +
-    `- 시스템 신호(사용자 말 아님)로 표시된 글은 사용자이 한 말로 쓰지 않는다.\n\n` +
+    `- 시스템 신호(사용자 말 아님)로 표시된 글은 사용자가 한 말로 쓰지 않는다.\n\n` +
     BRIEF_HEADINGS.join('\n\n') + '\n'
 }
 
@@ -289,7 +295,7 @@ export function recentTurns(messages: readonly { role: string; text: string }[],
 
 // ───────────── 클립보드 ─────────────
 // 모드에는 클립보드를 «읽는» 기능이 없어서(쓰기만 있어요) PowerShell로 읽어요.
-// 사용자이 열어 보거나 /clip 을 쓴 순간에만 읽고, 따로 기록해 두지 않아요.
+// 사용자가 열어 보거나 /clip 을 쓴 순간에만 읽고, 따로 기록해 두지 않아요.
 
 export type Clip =
   | { kind: 'empty' }
@@ -513,4 +519,190 @@ export function clipRowText(it: ClipItem): string {
     return `${when} 글 ${it.chars ?? 0}자 · ${first || '(공백)'}`
   }
   return `${when} 기타 (붙일 수 없어요)`
+}
+
+// ───────────── 메일 (claude.ai Gmail 커넥터, 읽기만) ─────────────
+
+/** Claude Code 에 연결된 Gmail 커넥터 이름. /mcp 에 이 이름으로 보여요. */
+export const GMAIL_SERVER = 'claude.ai Gmail'
+export const MAIL_PAGE = 20
+export const MAIL_BODY_MAX = 4000
+export const MAIL_SHOW_MESSAGES = 5
+
+export type MailRow = { id: string; subject: string; from: string; date: string; unread: boolean; count: number; url?: string }
+export type MailMsg = { from: string; date: string; body: string; cut: boolean }
+export type MailThread = { id: string; subject: string; url?: string; messages: MailMsg[]; total: number }
+
+type McpBlock = { type: string; text?: string }
+type McpResultLike = { content?: readonly McpBlock[]; isError?: boolean; structuredContent?: unknown }
+
+/** MCP 결과에서 JSON 을 꺼내요. structuredContent 가 있으면 그걸, 없으면 글 블록을 JSON 으로 읽어요. */
+export function mcpJson(r: McpResultLike): unknown {
+  if (r.structuredContent !== undefined && r.structuredContent !== null && typeof r.structuredContent === 'object') return r.structuredContent
+  const text = (r.content ?? []).filter(b => b.type === 'text' && typeof b.text === 'string').map(b => b.text).join('')
+  if (!text.trim()) return {}
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return undefined
+  }
+}
+
+/** 실패한 MCP 결과의 글을 한 줄로 줄여요. */
+export function mcpErrorText(r: McpResultLike): string {
+  const text = (r.content ?? []).map(b => b.text ?? '').join(' ').replace(/\s+/g, ' ').trim()
+  return (text || '이유를 알려 주지 않았어요').slice(0, 160)
+}
+
+const asStr = (v: unknown) => (typeof v === 'string' ? v : '')
+type RawMsg = { date?: unknown; sender?: unknown; subject?: unknown; labelIds?: unknown; plaintextBody?: unknown; snippet?: unknown }
+const rawMessages = (t: Record<string, unknown>): RawMsg[] => (Array.isArray(t.messages) ? (t.messages as RawMsg[]) : [])
+const byDate = (a: RawMsg, b: RawMsg) => asStr(a.date).localeCompare(asStr(b.date))
+
+/** search_threads 결과 → 목록 줄. 스레드마다 제목은 첫 메일, 보낸 사람·시각은 마지막 메일 것이에요. */
+export function parseThreadList(data: unknown): MailRow[] {
+  const threads = (data as { threads?: unknown } | undefined)?.threads
+  if (!Array.isArray(threads)) return []
+  const rows: MailRow[] = []
+  for (const t of threads as Record<string, unknown>[]) {
+    const id = asStr(t.id)
+    const msgs = rawMessages(t).slice().sort(byDate)
+    if (!id || msgs.length === 0) continue
+    const first = msgs[0]!
+    const last = msgs[msgs.length - 1]!
+    rows.push({
+      id,
+      subject: asStr(first.subject).trim() || '(제목 없음)',
+      from: asStr(last.sender),
+      date: asStr(last.date),
+      unread: msgs.some(m => Array.isArray(m.labelIds) && (m.labelIds as unknown[]).includes('UNREAD')),
+      count: typeof t.messageCount === 'number' ? t.messageCount : msgs.length,
+      url: asStr(t.viewUrl) || undefined,
+    })
+  }
+  return rows
+}
+
+const ENTITIES: Record<string, string> = { '&nbsp;': ' ', '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'", '&apos;': "'" }
+
+/** 링크 주소는 길어서 옆 창을 다 차지해요. 도메인만 ‹…›로 남겨요. */
+function shortUrl(url: string): string {
+  const host = /^https?:\/\/([^/?#\s]+)/i.exec(url)?.[1] ?? ''
+  return host ? `‹${host.replace(/^www\./, '')}›` : ''
+}
+
+/**
+ * Gmail 이 HTML 메일을 글로 바꾼 본문을 옆 창에서 읽기 좋게 다듬어요.
+ *  · 표(`| 칸 | 칸 |`)는 칸을 « · »로 잇고, 두 칸짜리 짧은 머리는 «머리: 값»으로 써요. 빈 칸만 있는 줄은 지워요.
+ *  · 링크 `[글](주소)`는 글만 남기고, 글이 없는 링크(추적 주소)는 지워요. 맨 주소는 도메인만 남겨요.
+ *  · 굵게(**)·제목(#)·이미지 표시, 구분선, 겹친 빈 줄, 줄 안의 겹친 빈칸을 지워요.
+ *  · 답장 메일의 인용(> 로 시작하는 줄)은 한 줄 안내로 접어요. 앞 메일은 위아래에 따로 보여요.
+ */
+export function cleanMailBody(raw: string): string {
+  const out: string[] = []
+  let quoted = 0
+  const flushQuote = () => {
+    if (quoted > 0) out.push(`(앞 메일 인용 ${quoted}줄은 접었어요)`)
+    quoted = 0
+  }
+  const lines = raw
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\u200b-\u200d\ufeff\u00ad]/g, '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/&(nbsp|amp|lt|gt|quot|#39|apos);/g, m => ENTITIES[m] ?? m)
+    .split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i]!
+    if (/^\s*>/.test(line)) {
+      quoted++
+      continue
+    }
+    // «… wrote:» / «…님이 작성:» 바로 뒤가 인용이면 그 줄도 접어요.
+    if (/(wrote|작성)\s*:\s*$/.test(line) && /^\s*>/.test(lines.slice(i + 1).find(l => l.trim()) ?? '')) continue
+    flushQuote()
+    line = line
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '') // 이미지
+      .replace(/\[([^\]]*)\]\((?:https?:|mailto:)[^)]*\)/gi, '$1') // 링크는 글만
+      .replace(/<?(https?:\/\/[^\s<>|)]+)>?/gi, (_m, url: string) => shortUrl(url)) // 맨 주소는 도메인만
+      .replace(/(\*\*|__)(.+?)\1/g, '$2')
+      .replace(/^\s*#{1,6}\s+/, '')
+    let text: string
+    if (/^\s*\|/.test(line) || /\|\s*$/.test(line)) {
+      const cells = line.split('|').map(c => c.replace(/\s+/g, ' ').trim()).filter(c => c && !/^:?-{2,}:?$/.test(c))
+      if (cells.length === 0) continue
+      text = cells.length === 2 && cells[0]!.length <= 8 ? `${cells[0]}: ${cells[1]}` : cells.join(' · ')
+    } else {
+      text = line.replace(/[ \t]+/g, ' ').trim()
+    }
+    text = text.replace(/\s*(→|->|▶|»)\s*$/, '').trim() // 링크를 지우고 남은 화살표
+    if (/^[-=_*~·•.\s]{3,}$/.test(text)) continue // 구분선
+    if (text === '' && (out.length === 0 || out[out.length - 1] === '')) continue
+    out.push(text)
+  }
+  flushQuote()
+  while (out.length > 0 && out[out.length - 1] === '') out.pop()
+  return out.join('\n')
+}
+
+/** get_thread 결과 → 본문 보기. 최신 메일이 위로 오고, 너무 긴 본문은 잘라요. */
+export function parseThread(data: unknown): MailThread | undefined {
+  const t = data as Record<string, unknown> | undefined
+  if (!t || typeof t !== 'object' || !asStr(t.id)) return undefined
+  const msgs = rawMessages(t).slice().sort(byDate)
+  const messages = msgs
+    .slice()
+    .reverse()
+    .slice(0, MAIL_SHOW_MESSAGES)
+    .map(m => {
+      const body = cleanMailBody(asStr(m.plaintextBody) || asStr(m.snippet))
+      return { from: asStr(m.sender), date: asStr(m.date), body: body.slice(0, MAIL_BODY_MAX), cut: body.length > MAIL_BODY_MAX }
+    })
+  return {
+    id: asStr(t.id),
+    subject: asStr(msgs[0]?.subject).trim() || '(제목 없음)',
+    url: asStr(t.viewUrl) || undefined,
+    messages,
+    total: msgs.length,
+  }
+}
+
+/** «홍길동 <a@b.com>» → 홍길동, «a@b.com» → a */
+export function senderName(s: string): string {
+  const m = /^\s*"?([^"<]*?)"?\s*<[^>]+>\s*$/.exec(s)
+  if (m && m[1]!.trim()) return m[1]!.trim()
+  const addr = /<([^>]+)>/.exec(s)?.[1] ?? s
+  return addr.split('@')[0]!.trim() || s.trim()
+}
+
+/** 오늘 받은 메일이면 «14:05», 아니면 «10/13» */
+export function mailTime(iso: string, now: number): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const n = new Date(now)
+  const pad2 = (x: number) => String(x).padStart(2, '0')
+  const sameDay = d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate()
+  return sameDay ? `${pad2(d.getHours())}:${pad2(d.getMinutes())}` : `${d.getMonth() + 1}/${d.getDate()}`
+}
+
+/** 메일 링크에서 연결된 계정 주소를 읽어요(authuser=…). 없으면 빈 글. */
+export function mailAccount(url: string | undefined): string {
+  const m = /[?&]authuser=([^&#]+)/.exec(url ?? '')
+  if (!m) return ''
+  try {
+    return decodeURIComponent(m[1]!)
+  } catch {
+    return m[1]!
+  }
+}
+
+/** Gmail 주소만 브라우저로 열어요. 다른 주소나 따옴표가 섞이면 undefined. */
+export function safeMailUrl(url: string | undefined): string | undefined {
+  if (!url || !url.startsWith('https://mail.google.com/')) return undefined
+  return /['"`\s]/.test(url) ? undefined : url
+}
+
+/** «>» 로 입력창에 넣는 글: 메일을 Gmail 에서 다시 찾아 읽고 할 일을 찾게 해요. 본문은 Claude 가 스레드 번호로 직접 읽어요. */
+export function mailActionPrompt(m: { id: string; subject: string; from: string; date: string }): string {
+  const parts = [m.from.trim(), m.date.slice(0, 10)].filter(Boolean)
+  return `메일 「${m.subject}」(${parts.length ? parts.join(', ') + ', ' : ''}Gmail 스레드 ${m.id})을 Gmail에서 읽고 내용을 확인한 뒤, 내가 해야 할 조치사항을 찾아 줘.`
 }
