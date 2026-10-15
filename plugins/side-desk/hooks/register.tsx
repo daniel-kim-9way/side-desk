@@ -8,13 +8,20 @@ import {
 import type { Board, Clip, ClipItem, Decision, MailRow, MailThread, Todo, Update, UsageWindow, Verdict } from './lib.ts'
 import { judgeSend, summarizeArgs } from './send-check.ts'
 import { MIRRORED_TOOLS, mirrorTool, trailingQuestion, withAutoDecision } from './mirror.ts'
+import {
+  CALENDAR_SERVER, CHECK_MARK, COMMAND_GUIDE, EDIT_TOOLS, MIN_VERSION, addChange, calendarArgs, changeLabel, changePrompt, changesFromMessages,
+  connectorCheck, editedPath, eventEnded, eventTime, guideCommand, parseEvents, permissionNote, versionAtLeast,
+} from './extras.ts'
+import type { CalEvent, Change, Check, Guide } from './extras.ts'
 
 // side-desk: Claude Code 옆에 «책상» 하나를 열어 줘요.
 //  · 할 일   : 이번 대화의 할 일과, 내가 정해야 하는 것을 옆에 고정해 둬요
 //  · 사용량  : 사용 한도와 대화 길이, 비용을 한눈에. 대화가 길어지면 이어가기 메모를 쓰고 새 대화로 넘겨요 (인터넷 전송·웹 서버 없음)
-//  · 메일    : 연결된 Gmail 받은편지함의 제목 목록, 고르면 본문 (읽기만)
+//  · 메일    : 연결된 Gmail 받은편지함의 제목 목록, 고르면 본문 (읽기만). 맨 위에 구글 캘린더의 오늘·내일 일정
+//  · 고친 파일: 할 일 탭에 이번 대화에서 Claude가 고친 파일 목록, «>»로 왜 바꿨는지 묻기
 //  · 클립    : 윈도우 클립보드 기록을 보고 입력창에 바로 붙여요
-//  · 설정    : 발송 전 확인 · 알림 · 프롬프트 가이드
+//  · 설정    : 발송 전 확인 · 알림 · 프롬프트 가이드 · 처음 설정 점검 · 자주 쓰는 명령
+//  · 알림    : 긴 작업이 끝났을 때, 질문·승인을 기다릴 때. 윈도우·WSL은 윈도우 알림, 맥·리눅스는 터미널 알림
 // 화면이 있는 세션에서만 묻고 움직여요. SIDE_DESK_OFF=1 이면 전부 꺼요.
 
 const PANE = 'side-desk'
@@ -126,6 +133,24 @@ let mailOpening: string | undefined // 본문을 불러오는 중인 스레드
 let mailNote: string | undefined // 본문을 못 불러온 이유
 const MAIL_STALE_MS = 2 * 60_000
 const MAIL_AUTO_MS = 5 * 60_000
+// 일정: 메일과 같은 때(탭을 열 때·새로고침·5분마다) 구글 캘린더 커넥터로 오늘·내일 일정을 읽어요. 읽기만 해요.
+let calState: 'idle' | 'loading' | 'ok' | 'failed' = 'idle'
+let calEvents: CalEvent[] = []
+let calAt = 0
+let calProblem: string | undefined
+let calLoaded = false // 한 번이라도 읽은 적이 있는지
+// 이번 대화에서 고친 파일(Edit·Write·NotebookEdit). 대화마다 따로 저장해요.
+let changes: Change[] = []
+let rootDir = ''
+// 처음 설정 점검: 설정 탭을 처음 열 때 한 번, «다시 점검»을 누를 때 해요.
+let checks: Check[] = []
+let checking = false
+let checked = false // 이 프로세스에서 한 번 점검했는지
+let checkAt = 0
+// 옆 창이 마지막으로 그려진 모양. 점검의 «화면» 줄이 써요.
+let lastPlacement: string | undefined
+// 승인 대기 알림이 같은 내용으로 연달아 뜨지 않게
+let lastPermNote = { text: '', at: 0 }
 // 이어가기로 시작한 대화와, 그 대화의 시작 크기(토큰)
 let seededSession: string | undefined
 let seedFloor: number | undefined
@@ -351,6 +376,7 @@ async function autoOpenDesk($: EngineInterface) {
     updateStatus($)
     if (tab === 'clip') void watchClipboard($)
     if (tab === 'mail') void mailOnTab($)
+    if (tab === 'settings') settingsOnTab($)
     const opened = await $.ui.open({ id: PANE, title: '책상', columns: cfg.paneColumns, closeOnEscape: true })
     if (opened && opened.isPlaced === false) {
       // 저절로 연 창은 터미널이 144칸 미만이면 그려지지 않고 기다려요. 이유를 보여 줘요.
@@ -376,13 +402,19 @@ function recordSend(kind: SendEntry['kind'], label: string, detail: string) {
   sendLog = [{ at: Date.now(), kind, label, detail: detail.slice(0, 160) }, ...sendLog].slice(0, 30)
 }
 
-// 윈도우 알림(풍선). 화면이 있는 세션에서, 알림이 켜져 있을 때만 띄워요.
-async function osNotify($: EngineInterface, title: string, body: string) {
+// 알림. 화면이 있는 세션에서, 알림이 켜져 있을 때만 띄워요.
+//  · 윈도우·WSL: 윈도우 알림(풍선)
+//  · 맥·리눅스: Claude Code 가 터미널로 보내는 알림($.ui.notify). 터미널이 알림을 받아 줘야 떠요.
+//  · force: 설정 탭의 «알림 시험». 알림을 꺼 둬도 한 번 띄워요.
+async function osNotify($: EngineInterface, title: string, body: string, force = false) {
   // 기다리지 않고 부르는 함수라서 어떤 오류도 밖으로 새면 안 돼요. 알림이 안 떠도 일은 그대로 해요.
   try {
-    if (!notifyOn || !(await isInteractive($))) return
+    if ((!notifyOn && !force) || !(await isInteractive($))) return
     const exe = await powershellFor($)
-    if (!exe) return
+    if (!exe) {
+      void $.ui.notify(body || title, { title }).catch(() => {})
+      return
+    }
     // 알림 글이 PowerShell 문자열을 깨지 않도록 따옴표·달러·괄호 등을 빼요.
     const safe = (s: string) => s.replace(/[\r\n]+/g, ' ').replace(/["'`$\\;|&<>(){}]/g, ' ').slice(0, 120)
     const script = [
@@ -495,6 +527,38 @@ async function saveBoard($: EngineInterface) {
   }
 }
 
+// 고친 파일 목록도 대화마다 따로 두고, 가장 최근 30개 대화만 남겨요.
+type StoredChanges = Record<string, { at: number; files: Change[] }>
+
+// 저장해 둔 목록이 없으면(이 기능이 생기기 전에 시작한 대화) 대화 기록에서 한 번 만들어요.
+async function loadChanges($: EngineInterface) {
+  try {
+    const id = await $.session.id()
+    const all = ((await $.store.get('changes')) ?? {}) as StoredChanges
+    const stored = all[id]?.files
+    if (Array.isArray(stored)) {
+      changes = stored
+      return
+    }
+    const messages = await $.session.messages().catch(() => [])
+    changes = Array.isArray(messages) ? changesFromMessages(messages) : []
+  } catch {
+    changes = []
+  }
+}
+
+async function saveChanges($: EngineInterface) {
+  try {
+    const id = await $.session.id()
+    const all = ((await $.store.get('changes')) ?? {}) as StoredChanges
+    all[id] = { at: await $.clock.now(), files: changes }
+    const keep = Object.entries(all).sort((a, b) => b[1].at - a[1].at).slice(0, 30)
+    await $.store.set('changes', Object.fromEntries(keep))
+  } catch {
+    // 저장이 안 돼도 화면은 그대로 써요.
+  }
+}
+
 // 입력창 위에 열린 책상을 닫아요. 닫기가 거절되면 다음에 내가 말을 보낼 때 한 번 더 해요.
 let inlinePending = false
 async function closeInlineDesk($: EngineInterface) {
@@ -540,6 +604,8 @@ async function deskText($: EngineInterface): Promise<string> {
     lines.push('화면: 알 수 없음')
   }
   lines.push(describeBoard(board))
+  lines.push(`고친 파일: ${changes.length}개` + (changes.length ? ` (최근: ${changes.slice(0, 3).map(c => changeLabel(c.path, rootDir).name).join(', ')})` : ''))
+  lines.push(`명령어 안내: ${COMMAND_GUIDE.map(guideCommand).join(' ')}`)
   return lines.join('\n')
 }
 
@@ -574,20 +640,52 @@ async function loadMailList($: EngineInterface, opts: { quiet?: boolean } = {}):
   }
 }
 
-// 탭을 열 때: 처음이거나, 실패했거나, 2분 넘게 지난 목록이면 다시 읽어요.
+// 오늘·내일 일정을 읽어요. 캘린더가 연결 안 돼 있어도 메일 목록은 그대로 보여요.
+//  · quiet: 저절로 다시 읽을 때예요. 실패해도 보던 일정을 그대로 둬요.
+async function loadCalendar($: EngineInterface, opts: { quiet?: boolean } = {}): Promise<void> {
+  if (calState === 'loading') return
+  const quiet = opts.quiet === true && calState === 'ok'
+  calState = 'loading'
+  try {
+    const now = await $.clock.now()
+    const r = await $.mcp.call(CALENDAR_SERVER, 'list_events', calendarArgs(now))
+    const data = r.isError ? undefined : mcpJson(r)
+    if (data === undefined) {
+      calState = quiet ? 'ok' : 'failed'
+      if (!quiet) calProblem = r.isError ? mcpErrorText(r) : '캘린더 답을 읽지 못했어요'
+      return
+    }
+    calEvents = parseEvents(data, now)
+    calState = 'ok'
+    calLoaded = true
+    calProblem = undefined
+  } catch (err) {
+    calState = quiet ? 'ok' : 'failed'
+    if (!quiet) calProblem = String(err).replace(/\s+/g, ' ').slice(0, 160)
+  } finally {
+    calAt = await $.clock.now()
+    $.ui.invalidate('ui.render')
+  }
+}
+
+// 탭을 열 때: 처음이거나, 실패했거나, 2분 넘게 지난 목록이면 다시 읽어요. 일정도 같은 기준이에요.
 async function mailOnTab($: EngineInterface) {
   const now = await $.clock.now()
-  if (mailState === 'idle' || mailState === 'failed' || (mailState === 'ok' && now - mailAt > MAIL_STALE_MS)) await loadMailList($)
+  const stale = (state: string, at: number) => state === 'idle' || state === 'failed' || (state === 'ok' && now - at > MAIL_STALE_MS)
+  await Promise.all([stale(mailState, mailAt) ? loadMailList($) : undefined, stale(calState, calAt) ? loadCalendar($) : undefined])
 }
 
 // 1분마다 불려요. 옆 창이 보이고 «메일» 탭을 보고 있을 때만, 읽은 지 5분이 지났으면 목록을 다시 읽어요.
 //  · 실패한 상태(연결 안 됨·권한 없음)에서는 저절로 다시 부르지 않아요. «다시 시도»를 누르면 돼요.
 async function mailTick($: EngineInterface) {
-  if (tab !== 'mail' || mailState !== 'ok') return
-  if ((await $.clock.now()) - mailAt < MAIL_AUTO_MS) return
+  if (tab !== 'mail') return
+  const now = await $.clock.now()
+  const mailDue = mailState === 'ok' && now - mailAt >= MAIL_AUTO_MS
+  const calDue = calState === 'ok' && now - calAt >= MAIL_AUTO_MS
+  if (!mailDue && !calDue) return
   const panes = await $.ui.panes().catch(() => [])
   if (!panes.some(p => p.id === PANE && p.isShown && p.isPlaced)) return
-  await loadMailList($, { quiet: true })
+  await Promise.all([mailDue ? loadMailList($, { quiet: true }) : undefined, calDue ? loadCalendar($, { quiet: true }) : undefined])
 }
 
 // 줄을 누르면 그 메일(스레드)의 본문을 불러와요. Gmail 의 «읽음» 표시는 바꾸지 않아요.
@@ -632,6 +730,112 @@ async function openMailInBrowser($: EngineInterface, url: string | undefined) {
     await $.process.run([ps, '-NoProfile', '-WindowStyle', 'Hidden', '-Command', `Start-Process '${safe}'`], { timeoutMs: 15000 })
   } catch (err) {
     $.ui.toast(`브라우저를 열지 못했어요: ${String(err).slice(0, 100)}`, { timeoutMs: 6000 })
+  }
+}
+
+// ───────────── 처음 설정 점검 · 명령어 안내 · 승인 대기 알림 ─────────────
+
+// 커넥터를 가볍게 한 번 불러 봐요. 됐으면 undefined, 아니면 이유.
+async function probeConnector($: EngineInterface, server: string, tool: string, args: Record<string, unknown>): Promise<string | undefined> {
+  try {
+    const r = await $.mcp.call(server, tool, args)
+    return r.isError ? mcpErrorText(r) : undefined
+  } catch (err) {
+    return String(err).replace(/\s+/g, ' ').slice(0, 160)
+  }
+}
+
+// 새 PC에 깔면 바로 부딪히는 것들을 한 번에 봐요. 설정 탭을 처음 열 때와 «다시 점검»을 누를 때만 해요.
+//  · 클립보드 기록 확인은 PowerShell 을 한 번 띄워요(윈도우·WSL만). 주기적으로는 안 해요.
+async function runChecks($: EngineInterface): Promise<void> {
+  if (checking) return
+  checking = true
+  $.ui.invalidate('ui.render')
+  try {
+    const host = await hostKind($)
+    const out: Check[] = []
+
+    const ver = await $.session.version().catch(() => undefined)
+    const verOk = ver ? versionAtLeast(ver.base ?? ver.version, MIN_VERSION) : undefined
+    out.push(
+      verOk === false
+        ? { id: 'version', label: 'Claude Code 버전', state: 'bad', detail: `${ver!.version} · ${MIN_VERSION} 이상이 필요해요`, fix: '터미널에서 claude update' }
+        : { id: 'version', label: 'Claude Code 버전', state: verOk ? 'ok' : 'na', detail: ver ? ver.version : '확인하지 못했어요' },
+    )
+
+    out.push(
+      lastPlacement === undefined
+        ? { id: 'screen', label: '화면', state: 'na', detail: '책상을 열면 확인해요' }
+        : lastPlacement === 'inline'
+          ? { id: 'screen', label: '화면', state: 'bad', detail: '책상이 입력창 위에 열려서 마우스로 안 눌려요', fix: '/tui fullscreen 을 한 번 치기' }
+          : { id: 'screen', label: '화면', state: 'ok', detail: '옆 창 · 마우스로 눌러요' },
+    )
+
+    const [gmail, cal] = await Promise.all([
+      probeConnector($, GMAIL_SERVER, 'search_threads', { query: 'in:inbox', pageSize: 1, view: 'THREAD_VIEW_MINIMAL' }),
+      probeConnector($, CALENDAR_SERVER, 'list_events', { ...calendarArgs(await $.clock.now()), pageSize: 1 }),
+    ])
+    out.push(connectorCheck('gmail', 'Gmail (메일 탭)', GMAIL_SERVER, ['mcp__claude_ai_Gmail__search_threads', 'mcp__claude_ai_Gmail__get_thread'], gmail))
+    out.push(connectorCheck('calendar', '구글 캘린더 (일정)', CALENDAR_SERVER, ['mcp__claude_ai_Google_Calendar__list_events'], cal))
+
+    const ps = await powershellFor($)
+    if (!ps) {
+      out.push({ id: 'clip', label: '클립보드 기록', state: 'na', detail: '윈도우에서만 써요' })
+      out.push({ id: 'notify', label: '알림', state: 'ok', detail: '터미널 알림을 써요. 안 뜨면 터미널의 알림 설정을 보세요' })
+    } else {
+      let psProblem: string | undefined
+      if (host === 'wsl' && ps === 'powershell.exe') psProblem = 'WSL에서 윈도우 PowerShell 을 못 찾았어요'
+      let clipProblem: string | undefined
+      if (!psProblem) {
+        try {
+          const run = await $.process.run([ps, '-NoProfile', '-STA', '-Command', CLIP_LIST_SCRIPT], { timeoutMs: 15000 })
+          clipProblem = run.exitCode === 0 ? parseClipList(run.stdout).problem : (run.stderr || `종료 코드 ${run.exitCode}`).trim().slice(0, 120)
+        } catch (err) {
+          psProblem = `PowerShell 을 실행하지 못했어요: ${String(err).slice(0, 100)}`
+        }
+      }
+      out.push(
+        psProblem
+          ? { id: 'clip', label: '클립보드 기록', state: 'bad', detail: psProblem, fix: '클립보드 탭과 알림이 안 돼요. /mnt/c 가 보이는지 확인' }
+          : clipProblem
+            ? { id: 'clip', label: '클립보드 기록', state: 'bad', detail: '윈도우 클립보드 기록이 꺼져 있어요', fix: '윈도우 설정 > 시스템 > 클립보드 > 클립보드 기록 켜기' }
+            : { id: 'clip', label: '클립보드 기록', state: 'ok', detail: '켜져 있어요' },
+      )
+      out.push(psProblem ? { id: 'notify', label: '알림', state: 'bad', detail: psProblem } : { id: 'notify', label: '알림', state: 'ok', detail: '윈도우 알림을 써요' })
+    }
+    if (!notifyOn) {
+      const i = out.findIndex(c => c.id === 'notify')
+      if (i >= 0) out[i] = { id: 'notify', label: '알림', state: 'na', detail: '꺼 뒀어요 (위 «알림» 스위치)' }
+    }
+
+    checks = out
+    checked = true
+  } catch (err) {
+    checks = [{ id: 'error', label: '점검', state: 'bad', detail: `점검하다 멈췄어요: ${String(err).slice(0, 120)}` }]
+  } finally {
+    checking = false
+    checkAt = await $.clock.now()
+    $.ui.invalidate('ui.render')
+  }
+}
+
+// 설정 탭을 열 때: 점검은 처음 한 번만 해요.
+function settingsOnTab($: EngineInterface) {
+  if (!checked && !checking) void runChecks($)
+}
+
+// Claude Code 가 «이 도구를 써도 될까요?» 창을 띄우면 알려요. 같은 내용이 10초 안에 또 오면 한 번만 알려요.
+async function notifyPermission($: EngineInterface, tool: string, input: unknown) {
+  try {
+    const note = permissionNote(tool, input)
+    if (!note) return
+    const now = await $.clock.now()
+    const text = note.title + note.body
+    if (text === lastPermNote.text && now - lastPermNote.at < 10_000) return
+    lastPermNote = { text, at: now }
+    await osNotify($, note.title, note.body)
+  } catch {
+    // 알림이 안 떠도 승인 창은 그대로 떠요.
   }
 }
 
@@ -805,7 +1009,39 @@ function para(els: Els, inner: number, text: string, opts: { indent?: number; di
   )
 }
 
-function pinTab(els: Els, inner: number) {
+type PinHandlers = { explain: (path: string) => void }
+
+const CHANGES_SHOWN = 6
+
+// 이번 대화에서 고친 파일. 최근에 고친 것이 위. «>»를 누르면 왜 바꿨는지 묻는 글을 입력창에 넣어요.
+function changesBlock(els: Els, inner: number, act: PinHandlers) {
+  const { Box, Text, Button } = els
+  const rows = changes.slice(0, CHANGES_SHOWN)
+  return (
+    <Box flexDirection="column">
+      {heading(els, '이번 대화에서 고친 파일', changes.length ? String(changes.length) : '')}
+      {changes.length === 0 && <Text dimColor>{'  없음'}</Text>}
+      {rows.map((c, i) => {
+        const { name, dir } = changeLabel(c.path, rootDir)
+        return (
+          <Box flexDirection="row" width={inner} columnGap={1}>
+            <Button key={'chg-' + i} label=">" plain onPress={() => act.explain(c.path)} />
+            <Box flexShrink={1} flexGrow={1}>
+              <Text wrap="truncate-end">
+                {name}
+                <Text dimColor>{(c.count > 1 ? ` ×${c.count}` : '') + (dir ? '  ' + dir : '')}</Text>
+              </Text>
+            </Box>
+          </Box>
+        )
+      })}
+      {changes.length > CHANGES_SHOWN && <Text dimColor>{`    … 외 ${changes.length - CHANGES_SHOWN}개`}</Text>}
+      {changes.length > 0 && para(els, inner, '> 누르면 왜 바꿨는지 물어요 · Edit·Write로 고친 것만', { dim: true })}
+    </Box>
+  )
+}
+
+function pinTab(els: Els, inner: number, act: PinHandlers) {
   const { Box, Text } = els
   const open = board.todos.filter(t => !t.isDone)
   const doneCount = board.todos.length - open.length
@@ -821,6 +1057,9 @@ function pinTab(els: Els, inner: number) {
       {board.todos.length === 0 && empty('없음')}
       {open.map(t => (t.isActive ? line(els, inner, '▸', t.text, { color: 'warning' }) : line(els, inner, '○', t.text)))}
       {doneCount > 0 && <Text dimColor>{`  ✓ ${doneCount}개 끝`}</Text>}
+      <Text> </Text>
+
+      {changesBlock(els, inner, act)}
     </Box>
   )
 }
@@ -918,6 +1157,44 @@ function usageTab(els: Els, inner: number, act: HandoffHandlers) {
   )
 }
 
+// 메일 탭 맨 위의 오늘·내일 일정. 읽기만 해요. 캘린더가 안 붙어 있으면 한 줄로 알려 주고, 메일은 그대로 보여요.
+function calendarBlock(els: Els, inner: number, now: number) {
+  const { Box, Text } = els
+  const today = calEvents.filter(ev => ev.day === 'today')
+  const tomorrow = calEvents.filter(ev => ev.day === 'tomorrow')
+  const row = (ev: CalEvent) => {
+    const ended = eventEnded(ev, now)
+    return (
+      <Box flexDirection="row" width={inner} columnGap={1} paddingLeft={2}>
+        <Box flexShrink={0}>
+          <Text dimColor={ended} color={ended ? undefined : 'claude'}>{padCells(eventTime(ev, now), 6)}</Text>
+        </Box>
+        <Box flexShrink={1} flexGrow={1}>
+          <Text dimColor={ended} wrap="truncate-end">
+            {ev.title}
+            <Text dimColor>{ev.location ? '  ' + ev.location : ''}</Text>
+          </Text>
+        </Box>
+      </Box>
+    )
+  }
+  return (
+    <Box flexDirection="column" paddingBottom={1}>
+      {heading(els, '일정', '오늘·내일')}
+      {calState === 'failed' &&
+        para(els, inner, /permission|권한|haven't granted/i.test(calProblem ?? '') ? '캘린더를 읽는 권한을 아직 안 받았어요. 설정 탭 «점검»에서 고치는 법을 보세요.' : '캘린더를 못 읽었어요. 설정 탭 «점검»에서 연결을 확인하세요.', { dim: true })}
+      {(calState === 'idle' || (calState === 'loading' && !calLoaded)) && <Text dimColor>{'  불러오는 중…'}</Text>}
+      {calState !== 'failed' && calLoaded && (
+        <Box flexDirection="column">
+          {today.length === 0 ? <Text dimColor>{'  오늘 일정 없음'}</Text> : today.map(row)}
+          {tomorrow.length > 0 && <Text dimColor>{'  내일'}</Text>}
+          {tomorrow.map(row)}
+        </Box>
+      )}
+    </Box>
+  )
+}
+
 // ask = «>» 조치사항 찾기 프롬프트를 입력창에 넣기 · browser = Gmail 에서 열기
 type MailHandlers = { open: (row: MailRow) => void; back: () => void; refresh: () => void; connect: () => void; ask: (m: { id: string; subject: string; from: string; date: string }) => void; browser: (url: string | undefined) => void }
 
@@ -954,10 +1231,12 @@ function mailTab(els: Els, inner: number, now: number, act: MailHandlers) {
   }
 
   const head = heading(els, '메일')
+  const cal = calendarBlock(els, inner, now)
   // 연결은 돼 있는데 도구 권한을 안 받은 경우(권한 묻기를 건너뛰지 않는 세션). 이때는 다시 연결해도 소용없어요.
   if (mailState === 'failed' && /permission|권한/i.test(mailProblem ?? '')) {
     return (
       <Box flexDirection="column" width={inner + 2} padding={1}>
+        {cal}
         {head}
         {para(els, inner, 'Gmail은 연결돼 있는데, 메일을 읽는 권한을 아직 안 받았어요.', { color: 'warning' })}
         {para(els, inner, '/permissions 에서 mcp__claude_ai_Gmail__search_threads 와 mcp__claude_ai_Gmail__get_thread 를 허용한 뒤 «다시 시도»를 누르세요.', { dim: true })}
@@ -970,6 +1249,7 @@ function mailTab(els: Els, inner: number, now: number, act: MailHandlers) {
   if (mailState === 'failed') {
     return (
       <Box flexDirection="column" width={inner + 2} padding={1}>
+        {cal}
         {head}
         {para(els, inner, 'Gmail을 불러오지 못했어요. 연결이 안 돼 있거나 로그인이 풀렸을 수 있어요.', { color: 'warning' })}
         {mailProblem !== undefined && para(els, inner, mailProblem, { dim: true })}
@@ -987,6 +1267,7 @@ function mailTab(els: Els, inner: number, now: number, act: MailHandlers) {
   const timeWidth = 5
   return (
     <Box flexDirection="column" width={inner + 2} padding={1}>
+      {cal}
       <Box flexDirection="row" justifyContent="space-between" width={inner}>
         {head}
         <Button key="mail-refresh" label="새로고침" hotkey="r" plain dimColor onPress={act.refresh} />
@@ -1021,7 +1302,59 @@ function mailTab(els: Els, inner: number, now: number, act: MailHandlers) {
   )
 }
 
-type SettingsHandlers = { send: () => void; notify: () => void; coach: () => void }
+type SettingsHandlers = {
+  send: () => void
+  notify: () => void
+  coach: () => void
+  recheck: () => void
+  testNotify: () => void
+  command: (g: Guide) => void
+}
+
+// 처음 설정 점검: ✓ 됨 · ✗ 고칠 것(아래에 고치는 법) · – 이 환경엔 해당 없음
+function checksBlock(els: Els, inner: number, act: SettingsHandlers) {
+  const { Box, Text, Button } = els
+  const tone: Record<Check['state'], string | undefined> = { ok: 'success', bad: 'error', na: undefined, wait: undefined }
+  return (
+    <Box flexDirection="column">
+      <Box flexDirection="row" justifyContent="space-between" width={inner}>
+        {heading(els, '점검', checked ? `${hhmm(checkAt)} 기준` : '')}
+        <Button key="recheck" label={checking ? '점검 중…' : '다시 점검'} hotkey="k" plain dimColor onPress={act.recheck} />
+      </Box>
+      {checks.length === 0 && <Text dimColor>{checking ? '  점검하는 중…' : '  아직 안 했어요'}</Text>}
+      {checks.map(c => (
+        <Box flexDirection="column">
+          {line(els, inner, CHECK_MARK[c.state], `${c.label} · ${c.detail}`, { color: tone[c.state], dim: c.state === 'na' })}
+          {c.fix !== undefined && para(els, inner, '→ ' + c.fix, { indent: 6, dim: true })}
+        </Box>
+      ))}
+      <Box flexDirection="row" paddingLeft={2} paddingTop={1}>
+        <Button key="notify-test" label="알림 시험" hotkey="t" onPress={act.testNotify} />
+      </Box>
+    </Box>
+  )
+}
+
+// 자주 쓰는 명령. 누르면 입력창에 넣기만 하고, 실행은 엔터로 해요.
+function guideBlock(els: Els, inner: number, act: SettingsHandlers) {
+  const { Box, Text, Button } = els
+  return (
+    <Box flexDirection="column">
+      {heading(els, '자주 쓰는 명령', '누르면 입력창에')}
+      {COMMAND_GUIDE.map(g => (
+        <Box flexDirection="row" width={inner} columnGap={1} paddingLeft={2}>
+          <Box flexShrink={0}>
+            <Button key={'cmd-' + g.name} label={guideCommand(g)} plain onPress={() => act.command(g)} />
+          </Box>
+          <Box flexShrink={1} flexGrow={1}>
+            <Text dimColor wrap="wrap">{g.text}</Text>
+          </Box>
+        </Box>
+      ))}
+    </Box>
+  )
+}
+
 
 function settingsTab(els: Els, inner: number, act: SettingsHandlers) {
   const { Box, Text, Button } = els
@@ -1040,11 +1373,17 @@ function settingsTab(els: Els, inner: number, act: SettingsHandlers) {
       {para(els, inner, '메일·광고·일정·공유처럼 바깥으로 나가는 일은 보내기 전에 내용을 보여 주고 물어요.', { indent: 4, dim: true })}
       <Text> </Text>
       {toggle('알림', notifyOn, 'toggle-notify', 'n', act.notify)}
-      {para(els, inner, `${cfg.notifyMinSeconds}초 넘게 걸린 일이 끝나면 윈도우 알림을 띄워요.`, { indent: 4, dim: true })}
+      {para(els, inner, `${cfg.notifyMinSeconds}초 넘게 걸린 일이 끝나거나, Claude가 질문하거나 승인을 기다리면 알려요.`, { indent: 4, dim: true })}
       <Text> </Text>
       {toggle('프롬프트 가이드', coachOn, 'toggle-coach', 'c', act.coach)}
       {para(els, inner, '흐릿한 요청이면 고쳐 줘요 · 켜면 작은 모델을 한 번 더 써요', { indent: 4, dim: true })}
       <Text> </Text>
+
+      {checksBlock(els, inner, act)}
+      <Text> </Text>
+      {guideBlock(els, inner, act)}
+      <Text> </Text>
+
       {heading(els, '최근 발송 확인', sendLog.length ? String(sendLog.length) : '')}
       {sendLog.length === 0 && <Text dimColor>{'  아직 없어요.'}</Text>}
       {sendLog.slice(0, 8).map(g => line(els, inner, hhmm(g.at), `${SEND_KIND[g.kind]} · ${g.label} · ${g.detail}`, { color: tone[g.kind] }))}
@@ -1086,7 +1425,7 @@ function clipTab(els: Els, inner: number, act: ClipHandlers) {
 const TABS: { name: TabName; hotkey: string; labels: [string, string, string] }[] = [
   { name: 'pin', hotkey: '1', labels: ['할 일', '할 일', '할일'] },
   { name: 'usage', hotkey: '2', labels: ['사용량', '사용량', '한도'] },
-  { name: 'mail', hotkey: '3', labels: ['메일', '메일', '메일'] },
+  { name: 'mail', hotkey: '3', labels: ['메일·일정', '메일', '메일'] },
   { name: 'clip', hotkey: '4', labels: ['클립보드', '클립', '클립'] },
   { name: 'settings', hotkey: '5', labels: ['설정', '설정', '설정'] },
 ]
@@ -1145,6 +1484,8 @@ export const register: Register = (on, options) => {
     const storedNotify = await $.store.get('notify')
     if (typeof storedNotify === 'boolean') notifyOn = storedNotify
     await loadBoard($)
+    rootDir = await $.session.root().catch(() => '')
+    await loadChanges($)
     await $.tool.register({ name: 'pin', description: DESCRIPTION, inputSchema: SCHEMA })
     void refreshUsage($).then(() => updateStatus($))
     $.clock.every(60_000, () => {
@@ -1152,7 +1493,7 @@ export const register: Register = (on, options) => {
       void mailTick($)
     })
     // 명령어는 이름이 겹치면 던지니까 맨 뒤에서, 하나씩 감싸서 등록해요.
-    await registerCommand($, { name: 'desk', description: '책상 열기: 할 일·사용량(이어가기 포함)·메일·클립·설정. text 를 붙이면 글로 보여 줘요', argumentHint: '[text]', immediate: true })
+    await registerCommand($, { name: 'desk', description: '책상 열기: 할 일·사용량(이어가기 포함)·메일·일정·클립·설정. text 는 글로 보기, check 는 처음 설정 점검', argumentHint: '[text|check]', immediate: true })
     await registerCommand($, { name: 'coach', description: '프롬프트 가이드 켜기·끄기', argumentHint: '[on|off]' })
     await registerCommand($, { name: 'handoff', description: '대화를 새 대화로 넘겨요', argumentHint: '[now|ask|auto|off]', immediate: true })
     await registerCommand($, { name: 'clip', description: '클립보드의 글을 입력창에 붙여요. 이미지는 파일로 저장하고 경로를 붙여요', immediate: true })
@@ -1161,12 +1502,17 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'desk' }, async ($, e) => {
     if (e.args.trim() === 'text') return { text: await deskText($) }
+    if (e.args.trim() === 'check') {
+      await runChecks($)
+      return { text: ['처음 설정 점검', ...checks.flatMap(c => [`${CHECK_MARK[c.state]} ${c.label} · ${c.detail}`, ...(c.fix ? [`    → ${c.fix}`] : [])])].join('\n') }
+    }
     openedByUser = true // 내가 직접 연 창은 입력창 위에 열려도 닫지 않아요.
     await refreshUsage($)
     updateStatus($)
     // 창을 다시 열었는데 «클립» 탭이 선택돼 있으면 바로 읽어요. «메일» 탭이면 받은편지함 제목을 읽어요.
     if (tab === 'clip') void watchClipboard($)
     if (tab === 'mail') void mailOnTab($)
+    if (tab === 'settings') settingsOnTab($)
     await $.ui.open({ id: PANE, title: '책상', columns: cfg.paneColumns, focus: true, closeOnEscape: true })
     return {}
   })
@@ -1238,6 +1584,30 @@ export const register: Register = (on, options) => {
     return r
   })
 
+  // 파일을 고친 도구(Edit·Write·NotebookEdit)가 성공하면 «이번 대화에서 고친 파일»에 올려요. 서브에이전트가 고친 것도 올려요.
+  on('tool.call', { tool: [...EDIT_TOOLS] }, async ($, e, next) => {
+    const r = await next(e)
+    try {
+      const failed = Boolean((r as { deny?: unknown }).deny || (r as { isError?: unknown }).isError)
+      const path = editedPath(e)
+      if (!failed && path) {
+        changes = addChange(changes, path, await $.clock.now())
+        await saveChanges($)
+        $.ui.invalidate('ui.render')
+      }
+    } catch {
+      // 목록이 못 따라가도 Claude의 일은 그대로 돼요.
+    }
+    return r
+  })
+
+  // Claude Code 가 «이 도구를 써도 될까요?» 창을 띄우면 알려요. 자리를 비웠을 때 몇십 분씩 멈춰 있지 않게요.
+  // (권한 묻기를 꺼 둔 세션에서는 이 창이 안 떠서 알림도 안 와요)
+  on('classic.PermissionRequest', async ($, e, next) => {
+    void notifyPermission($, String(e.tool_name ?? ''), e.tool_input)
+    return next(e)
+  })
+
   // 모든 도구 호출을 한 번 봐요. 바깥으로 나가는 일이면 보내기 전에 물어요.
   // 이 훅이 고장 나도 도구는 그대로 실행돼요(대화가 멈추지 않게).
   on('tool.call', async ($, e, next) => {
@@ -1290,6 +1660,7 @@ export const register: Register = (on, options) => {
     const labelSet = tabLabelSet(inner + 1)
     // 옆이 아니라 입력창 위에 열렸다면(클래식 화면) 마우스가 안 눌려요. 클릭은 풀스크린 화면에서만 와요.
     const inline = e.props.placement === 'inline'
+    lastPlacement = e.props.placement
     const unfocused = e.props.isFocused === false
     // 풀스크린이 아닌 것이 확실할 때만 닫아요. 시작 직후 너비를 못 쟀거나(모름) 풀스크린인데 잠깐 좁은 때는 그대로 둬요.
     if (inline && e.viewport?.isFullscreen === false && !openedByUser && !inlineClosed) {
@@ -1319,12 +1690,19 @@ export const register: Register = (on, options) => {
           // 클립 탭은 열 때 감시를 시작해요. 메일 탭은 열 때 받은편지함 제목을 읽어요.
           if (name === 'clip') void watchClipboard($)
           if (name === 'mail') void mailOnTab($)
+          if (name === 'settings') settingsOnTab($)
         }}
       />
     )
     const body =
       tab === 'pin'
-        ? pinTab(els, inner)
+        ? pinTab(els, inner, {
+            explain: (path: string) => {
+              void $.prompt.fill({ text: changePrompt(path) }).then(r => {
+                $.ui.toast(r.isFilled ? '입력창에 넣었어요. Esc로 입력창에 돌아가 엔터를 누르면 물어봐요.' : '입력창에 못 넣었어요.', { timeoutMs: 6000 })
+              })
+            },
+          })
         : tab === 'usage'
           ? usageTab(els, inner, {
               now: () => void startHandoff($, true),
@@ -1341,7 +1719,10 @@ export const register: Register = (on, options) => {
                   mailView = undefined
                   redraw()
                 },
-                refresh: () => void loadMailList($),
+                refresh: () => {
+                  void loadMailList($)
+                  void loadCalendar($)
+                },
                 connect: () => connectGmail($),
                 // 입력창을 이 글로 채우기만 해요. 보내기는 엔터로 해요.
                 ask: m => {
@@ -1375,6 +1756,16 @@ export const register: Register = (on, options) => {
                     coachOn = !coachOn
                     void $.store.set('coach', coachOn)
                     redraw()
+                  },
+                  recheck: () => void runChecks($),
+                  testNotify: () => {
+                    void osNotify($, '알림 시험', '이 알림이 보이면 잘 돼요', true)
+                    $.ui.toast('알림을 보냈어요. 안 보이면 점검의 «알림» 줄을 보세요.', { timeoutMs: 6000 })
+                  },
+                  command: (g: Guide) => {
+                    void $.prompt.fill({ text: guideCommand(g) }).then(r => {
+                      $.ui.toast(r.isFilled ? `입력창에 ${guideCommand(g)} 를 넣었어요. 엔터를 누르면 실행돼요.` : '입력창에 못 넣었어요.', { timeoutMs: 6000 })
+                    })
                   },
                 })
     return (
@@ -1497,7 +1888,15 @@ export const register: Register = (on, options) => {
   // /clear 뒤: 핀을 새 대화로 옮기고, 이어가기 메모를 읽으라는 첫 메시지를 넣어요.
   on('classic.SessionStart', async ($, e, next) => {
     const r = await next(e)
-    if (e.source === 'resume' || e.source === 'fork') await loadBoard($)
+    if (e.source === 'resume' || e.source === 'fork') {
+      await loadBoard($)
+      await loadChanges($)
+    }
+    // 새 대화(/clear·인수인계)는 고친 파일 목록을 비우고 시작해요.
+    if (e.source === 'clear') {
+      changes = []
+      $.ui.invalidate('ui.render')
+    }
     // 시작·이어하기뿐 아니라 /tui 로 다시 뜬 세션도 있어서, clear·compact 만 빼고 한 번은 열어 봐요.
     if (e.source !== 'compact' && e.source !== 'clear') {
       void autoOpenDesk($)

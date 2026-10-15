@@ -227,3 +227,63 @@ test('자동 열기는 기본이 꺼져 있어요', async ($, on) => {
   await s.clock.advance(0)
   expect(s.opened.length).toBe(0)
 })
+
+// ───────────── 승인 기다릴 때 알림 · 맥·리눅스 알림 ─────────────
+
+function stubPerm(on: any, env: Record<string, string> = {}) {
+  const s = stub(on, ['terminal'], '진행하기', env)
+  const notes: { text: string; title?: string }[] = []
+  on('classic.PermissionRequest', () => ({}))
+  on('ui.notify', ($: any, e: any) => {
+    notes.push({ text: e.text, title: e.title })
+    return { value: { isSent: true, channel: 'terminal' } }
+  })
+  const ask = async ($: any, tool_name: string, tool_input: unknown) => {
+    await $.classic.PermissionRequest({ hook_event_name: 'PermissionRequest', tool_name, tool_input, session_id: 's', transcript_path: '', cwd: '/work' })
+    await s.clock.advance(0)
+  }
+  return { ...s, notes, ask }
+}
+
+test('승인 대기: Claude Code 가 승인 창을 띄우면 무엇을 하려는지 알림으로 알려요', async ($, on) => {
+  const s = stubPerm(on)
+  await s.ask($, 'Bash', { command: 'npm install left-pad' })
+  const call = s.runs.find(a => a[0] === 'powershell')
+  expect(call).toBeDefined()
+  expect(call!.join(' ')).toMatch(/승인을 기다려요/)
+  expect(call!.join(' ')).toMatch(/npm install left-pad/)
+})
+
+test('승인 대기: 질문(AskUserQuestion)은 따로 알리니 승인 알림을 또 보내지 않아요', async ($, on) => {
+  const s = stubPerm(on)
+  await s.ask($, 'AskUserQuestion', { questions: [] })
+  expect(s.runs.length).toBe(0)
+})
+
+test('승인 대기: 같은 승인 창이 10초 안에 또 뜨면 한 번만 알려요', async ($, on) => {
+  const s = stubPerm(on)
+  await s.ask($, 'Bash', { command: 'make' })
+  await s.ask($, 'Bash', { command: 'make' })
+  expect(s.runs.length).toBe(1)
+  await s.clock.advance(11_000)
+  await s.ask($, 'Bash', { command: 'make' })
+  expect(s.runs.length).toBe(2)
+})
+
+test('승인 대기: 화면 없는 실행에서는 알리지 않아요', async ($, on) => {
+  const s = stub(on, [], '진행하기')
+  on('classic.PermissionRequest', () => ({}))
+  await $.classic.PermissionRequest({ hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'make' }, session_id: 's', transcript_path: '', cwd: '/work' })
+  await s.clock.advance(0)
+  expect(s.runs.length).toBe(0)
+})
+
+test('맥·리눅스: 알림은 PowerShell 대신 Claude Code 의 터미널 알림으로 보내요', async ($, on) => {
+  const s = stubPerm(on, { OS: '' })
+  await $.turn.complete({ turnId: 'm1', answer: '정리를 끝냈어요', durationMs: 90_000, isAborted: false, usage: null })
+  await s.clock.advance(0)
+  expect(s.runs.length).toBe(0)
+  expect(s.notes).toEqual([{ text: '정리를 끝냈어요', title: '작업이 끝났어요 · 1분 30초' }])
+  await s.ask($, 'Write', { file_path: '/w/a.md' })
+  expect(s.notes[1]).toEqual({ text: 'Write: /w/a.md', title: '승인을 기다려요' })
+})

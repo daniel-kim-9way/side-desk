@@ -43,6 +43,34 @@ const THREAD_T2 = {
 
 const ok = (o: unknown) => ({ value: { content: [{ type: 'text', text: JSON.stringify(o) }], isError: false } })
 
+// list_events 가 돌려주는 모양(필드 이름은 실제 응답에서 옮겼어요). 날짜는 모드가 보낸 «오늘 0시»에 맞춰 만들어요.
+// 시각에 시간대를 안 붙여서, 테스트를 돌리는 PC의 시간대가 달라도 «그 PC의 오늘 10시»로 읽혀요.
+function events(day: string) {
+  const [y, m, d] = day.split('-').map(Number) as [number, number, number]
+  const nd = new Date(y, m - 1, d + 1)
+  const next = `${nd.getFullYear()}-${String(nd.getMonth() + 1).padStart(2, '0')}-${String(nd.getDate()).padStart(2, '0')}`
+  return {
+    summary: '개인일정',
+    timeZone: 'Asia/Seoul',
+    events: [
+      { id: 'e1', summary: '주간 회의', location: '3층 회의실', status: 'confirmed', start: { dateTime: `${day}T10:00:00` }, end: { dateTime: `${day}T11:00:00` } },
+      { id: 'e0', summary: '아침 운동', status: 'confirmed', start: { dateTime: `${day}T07:00:00` }, end: { dateTime: `${day}T08:00:00` } },
+      { id: 'e2', summary: '휴가', status: 'confirmed', start: { date: day }, end: { date: next } },
+      { id: 'e3', summary: '고객 미팅', status: 'confirmed', start: { dateTime: `${next}T14:00:00` }, end: { dateTime: `${next}T15:00:00` } },
+      { id: 'e4', summary: '취소된 일정', status: 'cancelled', start: { dateTime: `${day}T15:00:00` }, end: { dateTime: `${day}T16:00:00` } },
+    ],
+  }
+}
+
+// 테스트 시계는 0(1970-01-01)에서 시작해요. 그다음 날 이 PC 시각으로 오전 9시까지 돌려요(타이머를 걸기 전에).
+const nineAm = () => {
+  const z = new Date(0)
+  return new Date(z.getFullYear(), z.getMonth(), z.getDate() + 1, 9, 0, 0).getTime()
+}
+
+// 메일 탭에 필요한 것만 답해 주는 가짜 환경.
+//  · mcp.call   = Gmail 커넥터. state.mode 로 연결됨·안 됨·오류 답을 고르고, 부른 도구를 calls 에 남겨요.
+//  · command.run = «연결하기»가 여는 /mcp
 // 메일 탭에 필요한 것만 답해 주는 가짜 환경.
 //  · mcp.call   = Gmail 커넥터. state.mode 로 연결됨·안 됨·오류 답을 고르고, 부른 도구를 calls 에 남겨요.
 //  · command.run = «연결하기»가 여는 /mcp
@@ -51,6 +79,7 @@ function stubMail(on: any) {
   const filled: { text: string; mode?: string }[] = []
   const state = {
     mode: 'connected' as 'connected' | 'throws' | 'isError' | 'permission',
+    cal: 'connected' as 'connected' | 'empty' | 'permission' | 'throws',
     calls: [] as { server: string; tool: string; args: Record<string, unknown> }[],
     commands: [] as string[],
     runs: [] as string[],
@@ -82,6 +111,11 @@ function stubMail(on: any) {
   })
   on('mcp.call', ($: any, e: any) => {
     state.calls.push({ server: e.server, tool: e.tool, args: e.args })
+    if (e.server === 'claude.ai Google Calendar') {
+      if (state.cal === 'throws') return { deny: 'MCP server "claude.ai Google Calendar" is not connected' }
+      if (state.cal === 'permission') return { deny: `$.mcp.call(claude.ai Google Calendar, list_events) refused: Claude requested permissions to use mcp__claude_ai_Google_Calendar__list_events, but you haven't granted it yet.` }
+      return ok(state.cal === 'empty' ? { summary: '개인일정' } : events(String(e.args.startTime).slice(0, 10)))
+    }
     // { deny } 는 부른 쪽의 promise 를 거절해요(연결 안 된 서버를 부른 것과 같아요)
     if (state.mode === 'throws') return { deny: 'MCP server "claude.ai Gmail" is not connected' }
     // 실제 엔진이 권한 묻기를 건너뛰지 않는 세션에서 낸 문장 그대로예요(claude -p 로 확인)
@@ -92,7 +126,9 @@ function stubMail(on: any) {
     return ok({})
   })
   on('session.start', () => ({ cwd: '/work' }))
-  return { clock, filled, state }
+  // 메일 탭은 일정(캘린더)도 같이 읽어요. 메일 테스트는 Gmail 부른 것만 세요.
+  const gmail = () => state.calls.filter(c => c.server === 'claude.ai Gmail')
+  return { clock, filled, state, gmail }
 }
 
 async function open($: any, clock: any) {
@@ -109,13 +145,12 @@ test('메일 탭을 열기 전에는 Gmail 을 부르지 않아요', async ($, o
 })
 
 test('메일 탭: 받은편지함 제목만 보여 주고, 연결된 계정을 적어요', async ($, on) => {
-  const { clock, state } = stubMail(on)
+  const { clock, gmail } = stubMail(on)
   const ui = await open($, clock)
   await ui.press({ key: 'tab-mail' })
   await clock.advance(0)
-  expect(state.calls.map(c => c.tool)).toEqual(['search_threads'])
-  expect(state.calls[0]!.server).toBe('claude.ai Gmail')
-  expect(state.calls[0]!.args.query).toBe('in:inbox')
+  expect(gmail().map(c => c.tool)).toEqual(['search_threads'])
+  expect(gmail()[0]!.args.query).toBe('in:inbox')
   expect(await ui.find({ type: 'Text', text: /보안 알림/ })).toBeDefined()
   // 여러 통짜리는 첫 메일 제목에 통 수를 붙여요
   expect(await ui.find({ type: 'Text', text: /견적 문의 \(2\)/ })).toBeDefined()
@@ -146,7 +181,7 @@ test('메일 탭: 줄을 누르면 그때 본문을 불러와요', async ($, on)
 })
 
 test('메일 탭: 목록의 «>»는 본문을 열지 않고 «조치사항 찾기» 글로 입력창을 채워요', async ($, on) => {
-  const { clock, filled, state } = stubMail(on)
+  const { clock, filled, gmail } = stubMail(on)
   const ui = await open($, clock)
   await ui.press({ key: 'tab-mail' })
   await clock.advance(0)
@@ -157,7 +192,7 @@ test('메일 탭: 목록의 «>»는 본문을 열지 않고 «조치사항 찾�
   expect(filled[0]!.mode).toBe('replace')
   expect(filled[0]!.text).toBe('메일 「견적 문의」(me@example.com, 2026-10-14, Gmail 스레드 t2)을 Gmail에서 읽고 내용을 확인한 뒤, 내가 해야 할 조치사항을 찾아 줘.')
   // 본문은 Claude 가 스레드 번호로 읽어요. 모드는 본문을 부르지 않았어요.
-  expect(state.calls.map(c => c.tool)).toEqual(['search_threads'])
+  expect(gmail().map(c => c.tool)).toEqual(['search_threads'])
   await ui.unmount()
 })
 
@@ -224,19 +259,19 @@ test('로그인이 풀려 오류로 답해도 «연결하기»가 보여요', as
 })
 
 test('메일 탭을 다시 열어도 2분 안이면 다시 부르지 않아요', async ($, on) => {
-  const { clock, state } = stubMail(on)
+  const { clock, state, gmail } = stubMail(on)
   const ui = await open($, clock)
   await ui.press({ key: 'tab-mail' })
   await clock.advance(0)
   await ui.press({ key: 'tab-pin' })
   await ui.press({ key: 'tab-mail' })
   await clock.advance(0)
-  expect(state.calls.length).toBe(1)
+  expect(gmail().length).toBe(1)
   await clock.advance(150_000)
   await ui.press({ key: 'tab-pin' })
   await ui.press({ key: 'tab-mail' })
   await clock.advance(0)
-  expect(state.calls.length).toBe(2)
+  expect(gmail().length).toBe(2)
   await ui.unmount()
 })
 
@@ -253,45 +288,132 @@ test('권한을 안 받았으면 «연결하기» 대신 권한 안내가 보여
 })
 
 test('메일 탭을 보고 있으면 5분마다 저절로 다시 읽고, 다른 탭이면 부르지 않아요', async ($, on) => {
-  const { clock, state } = stubMail(on)
+  const { clock, state, gmail } = stubMail(on)
   const ui = await open($, clock)
   await ui.press({ key: 'tab-mail' })
   await clock.advance(0)
-  expect(state.calls.length).toBe(1)
+  expect(gmail().length).toBe(1)
   await clock.advance(4 * 60_000)
-  expect(state.calls.length).toBe(1)
+  expect(gmail().length).toBe(1)
   await clock.advance(2 * 60_000)
-  expect(state.calls.length).toBe(2)
+  expect(gmail().length).toBe(2)
   await ui.press({ key: 'tab-pin' })
   await clock.advance(10 * 60_000)
-  expect(state.calls.length).toBe(2)
+  expect(gmail().length).toBe(2)
   await ui.unmount()
 })
 
 test('옆 창이 안 보이면 메일 탭이 선택돼 있어도 저절로 부르지 않아요', async ($, on) => {
-  const { clock, state } = stubMail(on)
+  const { clock, state, gmail } = stubMail(on)
   const ui = await open($, clock)
   await ui.press({ key: 'tab-mail' })
   await clock.advance(0)
   state.shown = false
   await clock.advance(10 * 60_000)
-  expect(state.calls.length).toBe(1)
+  expect(gmail().length).toBe(1)
   await ui.unmount()
 })
 
 test('저절로 다시 읽다 실패하면 오류 화면으로 바꾸지 않고 보던 목록을 그대로 둬요', async ($, on) => {
-  const { clock, state } = stubMail(on)
+  const { clock, state, gmail } = stubMail(on)
   const ui = await open($, clock)
   await ui.press({ key: 'tab-mail' })
   await clock.advance(0)
   state.mode = 'isError'
   await clock.advance(6 * 60_000)
-  expect(state.calls.length).toBe(2)
+  expect(gmail().length).toBe(2)
   expect(await ui.find({ type: 'Text', text: /보안 알림/ })).toBeDefined()
   expect(await ui.find({ key: 'mail-connect' })).toBeUndefined()
   // 다음 5분에 또 시도해요
   state.mode = 'connected'
   await clock.advance(6 * 60_000)
-  expect(state.calls.length).toBe(3)
+  expect(gmail().length).toBe(3)
+  await ui.unmount()
+})
+
+// ───────────── 일정 (메일 탭 맨 위) ─────────────
+
+test('메일 탭: 맨 위에 오늘·내일 일정을 보여 주고, 취소된 일정은 빼요', async ($, on) => {
+  const { clock, state } = stubMail(on)
+  await clock.advance(nineAm())
+  const ui = await open($, clock)
+  await ui.press({ key: 'tab-mail' })
+  await clock.advance(0)
+  const cal = state.calls.filter(c => c.server === 'claude.ai Google Calendar')
+  expect(cal.map(c => c.tool)).toEqual(['list_events'])
+  // 오늘 0시부터 모레 0시까지, 시간대 없이 보내요
+  expect(cal[0]!.args.startTime).toMatch(/^\d{4}-\d{2}-\d{2}T00:00:00$/)
+  expect(cal[0]!.args.endTime).toMatch(/^\d{4}-\d{2}-\d{2}T00:00:00$/)
+  expect(await ui.find({ type: 'Text', text: /주간 회의/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /3층 회의실/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /휴가/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^종일/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /고객 미팅/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '  내일' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /취소된 일정/ })).toBeUndefined()
+  // 이미 끝난 일정(7~8시)은 흐리게
+  const done = await ui.findAll({ type: 'Text', text: /아침 운동/ })
+  expect(done.some(t => t.props.dimColor === true)).toBe(true)
+  // 메일 목록도 그대로 있어요
+  expect(await ui.find({ type: 'Text', text: /보안 알림/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('메일 탭: 오늘 일정이 없으면 «오늘 일정 없음»', async ($, on) => {
+  const { clock, state } = stubMail(on)
+  state.cal = 'empty'
+  const ui = await open($, clock)
+  await ui.press({ key: 'tab-mail' })
+  await clock.advance(0)
+  expect(await ui.find({ type: 'Text', text: '  오늘 일정 없음' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('캘린더 권한이 없어도 메일은 보이고, 일정 자리에 한 줄로 알려요', async ($, on) => {
+  const { clock, state } = stubMail(on)
+  state.cal = 'permission'
+  const ui = await open($, clock)
+  await ui.press({ key: 'tab-mail' })
+  await clock.advance(0)
+  expect(await ui.find({ type: 'Text', text: /캘린더를 읽는 권한을 아직 안 받았어요/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /보안 알림/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('캘린더가 연결 안 돼 있어도 메일은 보여요', async ($, on) => {
+  const { clock, state } = stubMail(on)
+  state.cal = 'throws'
+  const ui = await open($, clock)
+  await ui.press({ key: 'tab-mail' })
+  await clock.advance(0)
+  expect(await ui.find({ type: 'Text', text: /캘린더를 못 읽었어요/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /보안 알림/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('«새로고침»은 메일과 일정을 같이 다시 읽어요', async ($, on) => {
+  const { clock, state, gmail } = stubMail(on)
+  const ui = await open($, clock)
+  await ui.press({ key: 'tab-mail' })
+  await clock.advance(0)
+  await ui.press({ key: 'mail-refresh' })
+  await clock.advance(0)
+  expect(gmail().length).toBe(2)
+  expect(state.calls.filter(c => c.server === 'claude.ai Google Calendar').length).toBe(2)
+  await ui.unmount()
+})
+
+test('일정도 메일 탭을 보고 있는 동안 5분마다 저절로 다시 읽어요', async ($, on) => {
+  const { clock, state } = stubMail(on)
+  const ui = await open($, clock)
+  await ui.press({ key: 'tab-mail' })
+  await clock.advance(0)
+  const cal = () => state.calls.filter(c => c.server === 'claude.ai Google Calendar').length
+  expect(cal()).toBe(1)
+  await clock.advance(6 * 60_000)
+  expect(cal()).toBe(2)
+  await ui.press({ key: 'tab-pin' })
+  await clock.advance(10 * 60_000)
+  expect(cal()).toBe(2)
   await ui.unmount()
 })
