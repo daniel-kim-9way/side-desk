@@ -606,6 +606,10 @@ async function deskText($: EngineInterface): Promise<string> {
   lines.push(describeBoard(board))
   lines.push(`고친 파일: ${changes.length}개` + (changes.length ? ` (최근: ${changes.slice(0, 3).map(c => changeLabel(c.path, rootDir).name).join(', ')})` : ''))
   lines.push(`명령어 안내: ${COMMAND_GUIDE.map(guideCommand).join(' ')}`)
+  await loadCalendar($)
+  const now = await $.clock.now()
+  const todayEvents = calEvents.filter(ev => ev.day === 'today').map(ev => `${eventTime(ev, now)} ${ev.title}`)
+  lines.push(calState === 'ok' ? `오늘 일정: ${todayEvents.join(' · ') || '없음'} · 내일 ${calEvents.filter(ev => ev.day === 'tomorrow').length}개` : `일정: 못 읽었어요 (${calProblem ?? '이유 모름'})`)
   return lines.join('\n')
 }
 

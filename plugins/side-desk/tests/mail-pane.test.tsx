@@ -55,7 +55,7 @@ function events(day: string) {
     events: [
       { id: 'e1', summary: '주간 회의', location: '3층 회의실', status: 'confirmed', start: { dateTime: `${day}T10:00:00` }, end: { dateTime: `${day}T11:00:00` } },
       { id: 'e0', summary: '아침 운동', status: 'confirmed', start: { dateTime: `${day}T07:00:00` }, end: { dateTime: `${day}T08:00:00` } },
-      { id: 'e2', summary: '휴가', status: 'confirmed', start: { date: day }, end: { date: next } },
+      { id: 'e2', summary: '휴가', status: 'confirmed', start: { date: `${day}T00:00:00Z` }, end: { date: `${next}T00:00:00Z` } }, // 종일 일정은 날짜에 시각이 붙어 와요
       { id: 'e3', summary: '고객 미팅', status: 'confirmed', start: { dateTime: `${next}T14:00:00` }, end: { dateTime: `${next}T15:00:00` } },
       { id: 'e4', summary: '취소된 일정', status: 'cancelled', start: { dateTime: `${day}T15:00:00` }, end: { dateTime: `${day}T16:00:00` } },
     ],

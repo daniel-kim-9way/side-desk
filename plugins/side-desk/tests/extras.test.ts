@@ -45,6 +45,19 @@ test('일정: 실제 응답처럼 시간대(+09:00)가 붙어 있어도 읽어�
   expect(evs[0]!.start).toBe(start)
 })
 
+test('일정: 종일 일정 날짜에 시각(T00:00:00Z)이 붙어 와도 오늘 일정이에요 (실제 커넥터 응답 모양)', () => {
+  // 2026-10-15 실제 응답 그대로. 이 모양을 날짜만 오는 줄 알고 비교해서 «대본 촬영»이 빠졌어요.
+  const data = {
+    events: [{ id: '404c', summary: '대본 촬영', status: 'confirmed', eventType: 'DEFAULT', start: { date: '2026-10-15T00:00:00Z' }, end: { date: '2026-10-16T00:00:00Z' } }],
+  }
+  const evs = parseEvents(data, NOW)
+  expect(evs.map(e => [e.title, e.day, e.allDay])).toEqual([['대본 촬영', 'today', true]])
+  expect(eventTime(evs[0]!, NOW)).toBe('종일')
+  // 며칠짜리도 같은 모양으로 와요
+  const trip = parseEvents({ events: [{ id: 't', summary: '출장', start: { date: '2026-10-14T00:00:00Z' }, end: { date: '2026-10-17T00:00:00Z' } }] }, NOW)
+  expect(trip.map(e => e.day)).toEqual(['today'])
+})
+
 test('일정: 어제부터 이어지는 일정은 오늘로 보고, 끝나는 시각을 «~»로 써요', () => {
   const data = {
     events: [

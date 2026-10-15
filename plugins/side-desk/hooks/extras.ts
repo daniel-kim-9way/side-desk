@@ -57,9 +57,11 @@ export function parseEvents(data: unknown, now: number): CalEvent[] {
     let end: number | undefined
     const allDay = typeof s.dateTime !== 'string' && typeof s.date === 'string'
     if (allDay) {
-      day = s.date as string
+      // 커넥터는 종일 일정의 날짜를 «2026-10-15»가 아니라 «2026-10-15T00:00:00Z»처럼 시각을 붙여서 줘요. 앞 10자(날짜)만 봐요.
+      day = (s.date as string).slice(0, 10)
       // 종일 일정의 end.date 는 끝난 «다음 날»이에요.
-      if (day < today && typeof e.date === 'string' && e.date > today) day = today
+      const endDay = typeof e.date === 'string' ? e.date.slice(0, 10) : ''
+      if (day < today && endDay > today) day = today
     } else if (typeof s.dateTime === 'string') {
       start = Date.parse(s.dateTime)
       if (Number.isNaN(start)) continue
