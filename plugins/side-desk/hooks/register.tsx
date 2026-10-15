@@ -9,8 +9,9 @@ import type { Board, Clip, ClipItem, Decision, MailRow, MailThread, Todo, Update
 import { judgeSend, summarizeArgs } from './send-check.ts'
 import { MIRRORED_TOOLS, mirrorTool, trailingQuestion, withAutoDecision } from './mirror.ts'
 import {
-  CALENDAR_SERVER, CHECK_MARK, COMMAND_GUIDE, EDIT_TOOLS, MIN_VERSION, addChange, calendarArgs, changeLabel, changePrompt, changesFromMessages,
-  connectorCheck, editedPath, eventEnded, eventTime, guideCommand, parseEvents, permissionNote, versionAtLeast,
+  CALENDAR_SERVER, CHECK_MARK, EDIT_TOOLS, MIN_VERSION, addChange, calendarArgs, changeLabel, changePrompt, changesFromMessages,
+  connectorCheck, editedPath, effectiveGuide, eventEnded, eventTime, guideCommand, guideKey, isDefaultGuide, parseEvents, parseGuideInput,
+  permissionNote, versionAtLeast,
 } from './extras.ts'
 import type { CalEvent, Change, Check, Guide } from './extras.ts'
 
@@ -28,7 +29,7 @@ const PANE = 'side-desk'
 const TOOL = 'mcp__side-desk__pin'
 const BRIEF_DIR = '.claude/state/side-desk/briefs'
 
-type TabName = 'pin' | 'usage' | 'mail' | 'clip' | 'settings'
+type TabName = 'pin' | 'usage' | 'mail' | 'clip' | 'cmds' | 'settings'
 type Mode = 'ask' | 'auto' | 'off'
 type Snapshot = {
   windows: UsageWindow[]
@@ -155,6 +156,11 @@ let checkAt = 0
 let lastPlacement: string | undefined
 // 승인 대기 알림이 같은 내용으로 연달아 뜨지 않게
 let lastPermNote = { text: '', at: 0 }
+// 명령 탭: 내가 넣은 명령과 기본 목록에서 뺀 명령. 다른 대화에서도 그대로예요($.store).
+let cmdAdded: Guide[] = []
+let cmdHidden: string[] = []
+let cmdNote: string | undefined // 넣지 못한 이유
+let cmdInputSeq = 0 // 넣을 때마다 올려서 입력 칸을 새로 그려요
 // 이어가기로 시작한 대화와, 그 대화의 시작 크기(토큰)
 let seededSession: string | undefined
 let seedFloor: number | undefined
@@ -609,7 +615,7 @@ async function deskText($: EngineInterface): Promise<string> {
   }
   lines.push(describeBoard(board))
   lines.push(`고친 파일: ${changes.length}개` + (changes.length ? ` (최근: ${changes.slice(0, 3).map(c => changeLabel(c.path, rootDir).name).join(', ')})` : ''))
-  lines.push(`명령어 안내: ${COMMAND_GUIDE.map(guideCommand).join(' ')}`)
+  lines.push(`명령어 안내: ${effectiveGuide(cmdAdded, cmdHidden).map(guideCommand).join(' ')}`)
   await loadCalendar($)
   const now = await $.clock.now()
   const todayEvents = calEvents.filter(ev => ev.day === 'today').map(ev => `${eventTime(ev, now)} ${ev.title}`)
@@ -742,6 +748,52 @@ async function openMailInBrowser($: EngineInterface, url: string | undefined) {
 }
 
 // ───────────── 처음 설정 점검 · 명령어 안내 · 승인 대기 알림 ─────────────
+
+// 명령 탭에서 쓴 글을 목록에 넣어요. 기본 명령을 뺐다가 다시 쓰면 뺀 표시만 풀어요.
+//  · 설명을 안 썼으면 Claude Code 가 그 명령에 붙여 둔 한 줄 설명을 가져와요(없으면 빈칸).
+async function addGuide($: EngineInterface, text: string) {
+  const r = parseGuideInput(text)
+  if ('error' in r) {
+    cmdNote = r.error
+    $.ui.invalidate('ui.render')
+    return
+  }
+  const g: Guide = { ...r.guide }
+  const cmd = guideCommand(g)
+  if (effectiveGuide(cmdAdded, cmdHidden).some(x => guideCommand(x) === cmd)) {
+    cmdNote = `${cmd} 는 이미 목록에 있어요.`
+    $.ui.invalidate('ui.render')
+    return
+  }
+  if (isDefaultGuide(g)) {
+    cmdHidden = cmdHidden.filter(x => x !== cmd)
+  } else {
+    if (!g.text) {
+      try {
+        const found = (await $.command.list()).find(c => c.name === g.name)
+        if (found?.description) g.text = found.description.slice(0, 80)
+      } catch {
+        // 설명이 없어도 넣어요.
+      }
+    }
+    cmdAdded = [...cmdAdded, g].slice(-30)
+  }
+  cmdNote = undefined
+  cmdInputSeq++
+  await saveGuide($)
+  $.ui.toast(`${cmd} 를 넣었어요.`, { timeoutMs: 4000 })
+  $.ui.invalidate('ui.render')
+}
+
+async function saveGuide($: EngineInterface) {
+  try {
+    await $.store.set('cmdAdded', cmdAdded)
+    await $.store.set('cmdHidden', cmdHidden)
+  } catch {
+    // 저장이 안 돼도 이번 대화에서는 보여요.
+  }
+}
+
 
 // 커넥터를 가볍게 한 번 불러 봐요. 됐으면 undefined, 아니면 이유.
 async function probeConnector($: EngineInterface, server: string, tool: string, args: Record<string, unknown>): Promise<string | undefined> {
@@ -978,7 +1030,7 @@ async function coachReview($: EngineInterface, prompt: string): Promise<Verdict 
 
 // ───────────── 화면: 탭 다섯 개 ─────────────
 
-type Els = { Box: any; Text: any; Button: any }
+type Els = { Box: any; Text: any; Button: any; Input?: any }
 
 // 소제목: 굵게 + 밑줄로 본문과 구분하고, 아래에 한 줄을 띄워요. 옆의 작은 글(개수·기준)은 흐리게, 밑줄 없이.
 // 색은 쓰지 않아요(경고 색과 섞이면 지저분해져요).
@@ -1317,7 +1369,6 @@ type SettingsHandlers = {
   coach: () => void
   recheck: () => void
   testNotify: () => void
-  command: (g: Guide) => void
 }
 
 // 처음 설정 점검: ✓ 됨 · ✗ 고칠 것(아래에 고치는 법) · – 이 환경엔 해당 없음
@@ -1344,26 +1395,52 @@ function checksBlock(els: Els, inner: number, act: SettingsHandlers) {
   )
 }
 
-// 자주 쓰는 명령. 누르면 입력창에 넣기만 하고, 실행은 엔터로 해요.
-function guideBlock(els: Els, inner: number, act: SettingsHandlers) {
-  const { Box, Text, Button } = els
+type CmdHandlers = { run: (g: Guide) => void; remove: (g: Guide) => void; add: (text: string) => void; reset: () => void }
+
+// 자주 쓰는 명령 탭. 누르면 입력창에 넣기만 하고 실행은 엔터로 해요(/clear 처럼 되돌릴 수 없는 것도 있어서요).
+//  · × 로 목록에서 빼고, 아래 칸에 «/명령 설명»을 쓰고 엔터로 넣어요. 다른 대화에서도 그대로예요.
+function commandsTab(els: Els, inner: number, act: CmdHandlers) {
+  const { Box, Text, Button, Input } = els
+  const list = effectiveGuide(cmdAdded, cmdHidden)
+  const changed = cmdAdded.length > 0 || cmdHidden.length > 0
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={inner + 2} padding={1}>
       {heading(els, '자주 쓰는 명령', '누르면 입력창에')}
-      {COMMAND_GUIDE.map(g => (
+      {list.length === 0 && <Text dimColor>{'  없음'}</Text>}
+      {list.map(g => (
         <Box flexDirection="row" width={inner} columnGap={1} paddingLeft={2}>
           <Box flexShrink={0}>
-            <Button key={'cmd-' + g.name} label={guideCommand(g)} plain onPress={() => act.command(g)} />
+            <Button key={guideKey(g)} label={guideCommand(g)} plain onPress={() => act.run(g)} />
           </Box>
           <Box flexShrink={1} flexGrow={1}>
-            <Text dimColor wrap="wrap">{g.text}</Text>
+            <Text dimColor wrap="wrap">{g.text || ' '}</Text>
+          </Box>
+          <Box flexShrink={0}>
+            <Button key={'del-' + guideKey(g)} label="×" plain dimColor onPress={() => act.remove(g)} />
           </Box>
         </Box>
       ))}
+      <Text> </Text>
+      {heading(els, '명령 넣기')}
+      {Input ? (
+        <Box paddingLeft={2} width={inner}>
+          {/* 넣고 나면 key 를 바꿔서 빈 칸을 새로 그려요(값을 억지로 비우면 다시 그릴 때마다 쓰던 글이 지워져요) */}
+          <Input key={'cmd-add-' + cmdInputSeq} placeholder="/명령 설명" submitLabel="넣기" onSubmit={(v: string) => act.add(v)} />
+        </Box>
+      ) : (
+        para(els, inner, '이 화면에서는 입력 칸을 못 그려요. 터미널이나 데스크톱 앱에서 넣어 주세요.', { dim: true })
+      )}
+      {cmdNote !== undefined && para(els, inner, cmdNote, { color: 'warning' })}
+      {para(els, inner, '예: /capcut 릴스 편집 · 인자가 있으면 /tui fullscreen - 설명', { dim: true })}
+      {para(els, inner, '× 누르면 목록에서 빼요', { dim: true })}
+      {changed && (
+        <Box flexDirection="row" paddingLeft={2} paddingTop={1}>
+          <Button key="cmd-reset" label="처음 목록으로" onPress={act.reset} />
+        </Box>
+      )}
     </Box>
   )
 }
-
 
 function settingsTab(els: Els, inner: number, act: SettingsHandlers) {
   const { Box, Text, Button } = els
@@ -1392,8 +1469,6 @@ function settingsTab(els: Els, inner: number, act: SettingsHandlers) {
       <Text> </Text>
 
       {checksBlock(els, inner, act)}
-      <Text> </Text>
-      {guideBlock(els, inner, act)}
       <Text> </Text>
 
       {heading(els, '최근 발송 확인', sendLog.length ? String(sendLog.length) : '')}
@@ -1439,7 +1514,8 @@ const TABS: { name: TabName; hotkey: string; labels: [string, string, string] }[
   { name: 'usage', hotkey: '2', labels: ['사용량', '사용량', '한도'] },
   { name: 'mail', hotkey: '3', labels: ['메일·일정', '메일', '메일'] },
   { name: 'clip', hotkey: '4', labels: ['클립보드', '클립', '클립'] },
-  { name: 'settings', hotkey: '5', labels: ['설정', '설정', '설정'] },
+  { name: 'cmds', hotkey: '5', labels: ['명령', '명령', '명령'] },
+  { name: 'settings', hotkey: '6', labels: ['설정', '설정', '설정'] },
 ]
 
 // 단추 하나는 «1: 이름»(3칸 + 이름)이고 단추 사이는 한 칸이에요. room = 탭 줄에 쓸 수 있는 칸 수.
@@ -1498,6 +1574,10 @@ export const register: Register = (on, options) => {
     if (typeof storedNotify === 'boolean') notifyOn = storedNotify
     const storedDone = await $.store.get('notifyDone')
     if (typeof storedDone === 'boolean') notifyDoneOn = storedDone
+    const storedAdded = (await $.store.get('cmdAdded')) as unknown
+    if (Array.isArray(storedAdded)) cmdAdded = storedAdded.filter((g): g is Guide => !!g && typeof (g as Guide).name === 'string' && typeof (g as Guide).text === 'string')
+    const storedHidden = (await $.store.get('cmdHidden')) as unknown
+    if (Array.isArray(storedHidden)) cmdHidden = storedHidden.filter((x): x is string => typeof x === 'string')
     await loadBoard($)
     rootDir = await $.session.root().catch(() => '')
     await loadChanges($)
@@ -1508,7 +1588,7 @@ export const register: Register = (on, options) => {
       void mailTick($)
     })
     // 명령어는 이름이 겹치면 던지니까 맨 뒤에서, 하나씩 감싸서 등록해요.
-    await registerCommand($, { name: 'desk', description: '책상 열기: 할 일·사용량(이어가기 포함)·메일·일정·클립·설정. text 는 글로 보기, check 는 처음 설정 점검', argumentHint: '[text|check]', immediate: true })
+    await registerCommand($, { name: 'desk', description: '책상 열기: 할 일·사용량(이어가기 포함)·메일·일정·클립·명령·설정. text 는 글로 보기, check 는 처음 설정 점검', argumentHint: '[text|check]', immediate: true })
     await registerCommand($, { name: 'coach', description: '프롬프트 가이드 켜기·끄기', argumentHint: '[on|off]' })
     await registerCommand($, { name: 'handoff', description: '대화를 새 대화로 넘겨요', argumentHint: '[now|ask|auto|off]', immediate: true })
     await registerCommand($, { name: 'clip', description: '클립보드의 글을 입력창에 붙여요. 이미지는 파일로 저장하고 경로를 붙여요', immediate: true })
@@ -1756,7 +1836,30 @@ export const register: Register = (on, options) => {
                 refresh: () => void readClipList($).then(redraw),
                 pick: (item: ClipItem) => void pasteItem($, item),
               })
-            : settingsTab(els, inner, {
+            : tab === 'cmds'
+            ? commandsTab(els, inner, {
+                run: (g: Guide) => {
+                  void $.prompt.fill({ text: guideCommand(g) }).then(r => {
+                    $.ui.toast(r.isFilled ? `입력창에 ${guideCommand(g)} 를 넣었어요. 엔터를 누르면 실행돼요.` : '입력창에 못 넣었어요.', { timeoutMs: 6000 })
+                  })
+                },
+                remove: (g: Guide) => {
+                  if (isDefaultGuide(g)) cmdHidden = [...cmdHidden, guideCommand(g)]
+                  else cmdAdded = cmdAdded.filter(x => guideCommand(x) !== guideCommand(g))
+                  cmdNote = undefined
+                  void saveGuide($)
+                  redraw()
+                },
+                add: (text: string) => void addGuide($, text),
+                reset: () => {
+                  cmdAdded = []
+                  cmdHidden = []
+                  cmdNote = undefined
+                  void saveGuide($)
+                  redraw()
+                },
+              })
+          : settingsTab(els, inner, {
                   send: () => {
                     sendConfirmOn = !sendConfirmOn
                     void $.store.set('sendConfirm', sendConfirmOn)
@@ -1781,11 +1884,6 @@ export const register: Register = (on, options) => {
                   testNotify: () => {
                     void osNotify($, '알림 시험', '이 알림이 보이면 잘 돼요', true)
                     $.ui.toast('알림을 보냈어요. 안 보이면 점검의 «알림» 줄을 보세요.', { timeoutMs: 6000 })
-                  },
-                  command: (g: Guide) => {
-                    void $.prompt.fill({ text: guideCommand(g) }).then(r => {
-                      $.ui.toast(r.isFilled ? `입력창에 ${guideCommand(g)} 를 넣었어요. 엔터를 누르면 실행돼요.` : '입력창에 못 넣었어요.', { timeoutMs: 6000 })
-                    })
                   },
                 })
     return (

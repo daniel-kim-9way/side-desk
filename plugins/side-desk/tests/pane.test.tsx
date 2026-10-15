@@ -91,11 +91,11 @@ test('설정 탭: 스위치 네 개가 있고 눌려요', async ($, on) => {
   await ui.unmount()
 })
 
-test('데스크톱 앱에서도 다섯 탭이 그려져요', async ($, on) => {
+test('데스크톱 앱에서도 여섯 탭이 그려져요', async ($, on) => {
   const { clock } = stubSession(on)
   await start($, clock)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  for (const key of ['tab-usage', 'tab-mail', 'tab-clip', 'tab-settings', 'tab-pin']) await ui.press({ key })
+  for (const key of ['tab-usage', 'tab-mail', 'tab-clip', 'tab-cmds', 'tab-settings', 'tab-pin']) await ui.press({ key })
   expect(await ui.find({ type: 'Text', text: /내가 정해야 하는 것/ })).toBeDefined()
   await ui.unmount()
 })
@@ -128,9 +128,9 @@ test('창 너비에 맞춰 탭 이름을 줄여서 탭 줄이 한 줄에 들어�
   // 넓으면 원래 이름
   expect(await label(60, 'tab-clip')).toBe('클립보드')
   expect(await label(60, 'tab-usage')).toBe('사용량')
-  // 44칸: «클립보드»만 «클립»으로
-  expect(await label(44, 'tab-clip')).toBe('클립')
-  expect(await label(44, 'tab-usage')).toBe('사용량')
+  // 52칸: «클립보드»만 «클립»으로 (탭이 여섯 개라 44칸에서는 가장 짧은 이름)
+  expect(await label(52, 'tab-clip')).toBe('클립')
+  expect(await label(52, 'tab-usage')).toBe('사용량')
   // 40칸(옆 창 기본 너비): 가장 짧은 이름
   expect(await label(40, 'tab-usage')).toBe('한도')
   expect(await label(40, 'tab-pin')).toBe('할일')

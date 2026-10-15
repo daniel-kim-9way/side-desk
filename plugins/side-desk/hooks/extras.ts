@@ -176,6 +176,44 @@ export const COMMAND_GUIDE: readonly Guide[] = [
 
 export const guideCommand = (g: Guide) => `/${g.name}${g.arg ? ' ' + g.arg : ''}`
 
+/** 버튼 key: «/tui fullscreen» → cmd-tui-fullscreen */
+export const guideKey = (g: Guide) => 'cmd-' + guideCommand(g).slice(1).replace(/[^A-Za-z0-9:_.-]+/g, '-')
+
+/**
+ * 내가 고친 목록 = 기본 목록에서 뺀 것(hidden)을 지우고, 넣은 것(added)을 뒤에 붙여요.
+ * 기본 목록을 통째로 저장하지 않아서, 다음 버전에 기본 명령이 늘면 그것도 보여요.
+ */
+export function effectiveGuide(added: readonly Guide[], hidden: readonly string[]): Guide[] {
+  const off = new Set(hidden)
+  const base = COMMAND_GUIDE.filter(g => !off.has(guideCommand(g)))
+  const seen = new Set(base.map(guideCommand))
+  return [...base, ...added.filter(g => !off.has(guideCommand(g)) && !seen.has(guideCommand(g)))]
+}
+
+export const isDefaultGuide = (g: Guide) => COMMAND_GUIDE.some(d => guideCommand(d) === guideCommand(g))
+
+/**
+ * 명령 탭의 «추가» 칸에 쓴 글 → 명령 하나. 잘못 쓰면 error 에 이유를 줘요.
+ *  · «/capcut 릴스 편집»            → /capcut, 설명 «릴스 편집»
+ *  · «/tui fullscreen - 옆에 붙이기» → 인자가 있으면 « - »로 나눠요
+ *  · «capcut»                      → 앞의 / 는 없어도 돼요
+ */
+export function parseGuideInput(text: string): { guide: Guide } | { error: string } {
+  const raw = text.replace(/\s+/g, ' ').trim()
+  if (!raw) return { error: '명령을 써 주세요. 예: /capcut 릴스 편집' }
+  const dash = raw.search(/ [-–—] /)
+  const head = (dash >= 0 ? raw.slice(0, dash) : raw).trim()
+  let desc = dash >= 0 ? raw.slice(dash + 3).trim() : ''
+  const parts = head.replace(/^\//, '').split(' ')
+  const name = parts[0] ?? ''
+  if (!/^[A-Za-z0-9][A-Za-z0-9:_.-]{0,59}$/.test(name)) return { error: `«${parts[0] ?? ''}»는 명령 이름으로 쓸 수 없어요. 영어·숫자·-·:만 돼요` }
+  let arg: string | undefined
+  if (dash >= 0) arg = parts.slice(1).join(' ') || undefined
+  else desc = parts.slice(1).join(' ')
+  if (arg && arg.length > 60) return { error: '인자가 너무 길어요(60자까지)' }
+  return { guide: { name, ...(arg ? { arg } : {}), text: desc.slice(0, 80) } }
+}
+
 // ───────────── 처음 설정 점검 ─────────────
 
 /** 이 모드가 기대는 기능(옆 창·훅 모양)이 들어온 첫 Claude Code 버전 */

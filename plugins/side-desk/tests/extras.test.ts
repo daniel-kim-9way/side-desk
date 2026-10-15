@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import {
-  addChange, calendarArgs, changeLabel, changePrompt, changesFromMessages, COMMAND_GUIDE, connectorCheck, eventEnded, eventTime,
-  guideCommand, localMidnight, parseEvents, permissionNote, versionAtLeast,
+  addChange, calendarArgs, changeLabel, changePrompt, changesFromMessages, COMMAND_GUIDE, connectorCheck, effectiveGuide, eventEnded, eventTime,
+  guideCommand, guideKey, isDefaultGuide, localMidnight, parseEvents, parseGuideInput, permissionNote, versionAtLeast,
 } from '../hooks/extras.ts'
 
 // 날짜는 이 PC의 시간대로 만들어요. 그래서 어느 시간대에서 돌려도 같은 뜻이에요.
@@ -117,6 +117,30 @@ test('명령어 안내: 입력창에 넣을 글', () => {
   expect(guideCommand({ name: 'clear', text: '' })).toBe('/clear')
   // 같은 명령이 두 번 들어 있지 않아요(버튼 key 가 겹치면 안 돼요)
   expect(new Set(COMMAND_GUIDE.map(g => g.name)).size).toBe(COMMAND_GUIDE.length)
+})
+
+test('명령 탭: 쓴 글을 명령으로 바꿔요', () => {
+  expect(parseGuideInput('/capcut 릴스 편집')).toEqual({ guide: { name: 'capcut', text: '릴스 편집' } })
+  expect(parseGuideInput('capcut')).toEqual({ guide: { name: 'capcut', text: '' } })
+  expect(parseGuideInput('  /tui   fullscreen - 옆에 붙이기 ')).toEqual({ guide: { name: 'tui', arg: 'fullscreen', text: '옆에 붙이기' } })
+  expect(parseGuideInput('/plugin:skill 플러그인 스킬')).toEqual({ guide: { name: 'plugin:skill', text: '플러그인 스킬' } })
+  expect('error' in parseGuideInput('')).toBe(true)
+  expect('error' in parseGuideInput('/한글명령 설명')).toBe(true)
+  expect('error' in parseGuideInput('/rm;ls 설명')).toBe(true)
+})
+
+test('명령 탭: 기본 목록에서 뺀 것은 빼고, 넣은 것은 뒤에 붙여요. 같은 명령은 한 번만', () => {
+  const list = effectiveGuide([{ name: 'capcut', text: '릴스 편집' }, { name: 'clear', text: '겹침' }], ['/clear', '/tui fullscreen'])
+  const cmds = list.map(guideCommand)
+  expect(cmds.includes('/clear')).toBe(false)
+  expect(cmds.includes('/tui fullscreen')).toBe(false)
+  expect(cmds.at(-1)).toBe('/capcut')
+  expect(cmds.length).toBe(COMMAND_GUIDE.length - 2 + 1)
+  // 넣은 것이 기본과 같으면 기본 하나만
+  expect(effectiveGuide([{ name: 'compact', text: '다른 설명' }], []).filter(g => g.name === 'compact').length).toBe(1)
+  expect(isDefaultGuide({ name: 'compact', text: '' })).toBe(true)
+  expect(isDefaultGuide({ name: 'capcut', text: '' })).toBe(false)
+  expect(guideKey({ name: 'tui', arg: 'fullscreen', text: '' })).toBe('cmd-tui-fullscreen')
 })
 
 test('점검: 버전 비교', () => {
