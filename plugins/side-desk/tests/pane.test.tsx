@@ -73,7 +73,7 @@ test('사용량 탭: 이어가기도 같은 탭에 있어요', async ($, on) => 
   await ui.unmount()
 })
 
-test('설정 탭: 스위치 세 개가 있고 눌려요', async ($, on) => {
+test('설정 탭: 스위치 네 개가 있고 눌려요', async ($, on) => {
   const { clock, stored } = stubSession(on)
   await start($, clock)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
@@ -83,6 +83,11 @@ test('설정 탭: 스위치 세 개가 있고 눌려요', async ($, on) => {
   expect(await ui.find({ key: 'toggle-coach' })).toBeDefined()
   await ui.press({ key: 'toggle-send' })
   expect(stored.get('sendConfirm')).toBe(false)
+  // 알림은 «질문·승인»과 «작업 끝» 두 스위치예요. 작업 끝 알림은 기본으로 꺼져 있어요.
+  expect(await ui.find({ type: 'Text', text: /질문·승인 알림 켜짐/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /작업 끝 알림 꺼짐/ })).toBeDefined()
+  await ui.press({ key: 'toggle-notify-done' })
+  expect(stored.get('notifyDone')).toBe(true)
   await ui.unmount()
 })
 

@@ -50,6 +50,7 @@ type Cfg = {
   coachModel: string
   sendConfirm: boolean
   notify: boolean
+  notifyDone: boolean
   notifyMinSeconds: number
   autoOpen: 'always' | 'off'
   paneColumns: number
@@ -65,6 +66,7 @@ const DEFAULTS: Cfg = {
   coachModel: 'haiku',
   sendConfirm: true,
   notify: true,
+  notifyDone: false,
   notifyMinSeconds: 60,
   autoOpen: 'off',
   paneColumns: 40,
@@ -85,6 +87,7 @@ function parseConfig(o: Record<string, unknown>): Cfg {
     coachModel: str(o.coachModel, DEFAULTS.coachModel),
     sendConfirm: str(o.sendConfirm, 'on').toLowerCase() !== 'off',
     notify: str(o.notify, 'on').toLowerCase() !== 'off',
+    notifyDone: str(o.notifyDone, 'off').toLowerCase() === 'on',
     notifyMinSeconds: num(o.notifyMinSeconds, DEFAULTS.notifyMinSeconds),
     autoOpen: str(o.autoOpen, 'off').toLowerCase() === 'always' ? 'always' : 'off',
     paneColumns: Math.max(30, Math.min(120, Math.round(num(o.paneColumns, DEFAULTS.paneColumns)))),
@@ -96,7 +99,8 @@ let cfg: Cfg = DEFAULTS
 let mode: Mode = DEFAULTS.handoffMode
 let coachOn = false
 let sendConfirmOn = true
-let notifyOn = true
+let notifyOn = true // 질문·승인 알림
+let notifyDoneOn = false // 작업 끝 알림(기본 꺼짐)
 let tab: TabName = 'pin'
 // 시작할 때 저절로 열린 창인지. 내가 /desk 로 연 창은 아니에요.
 let openedByUser = false // /desk 로 직접 연 적이 있는지
@@ -405,11 +409,11 @@ function recordSend(kind: SendEntry['kind'], label: string, detail: string) {
 // 알림. 화면이 있는 세션에서, 알림이 켜져 있을 때만 띄워요.
 //  · 윈도우·WSL: 윈도우 알림(풍선)
 //  · 맥·리눅스: Claude Code 가 터미널로 보내는 알림($.ui.notify). 터미널이 알림을 받아 줘야 떠요.
-//  · force: 설정 탭의 «알림 시험». 알림을 꺼 둬도 한 번 띄워요.
-async function osNotify($: EngineInterface, title: string, body: string, force = false) {
+//  · on: 이 알림을 띄울지. 기본은 «질문·승인 알림» 스위치예요. 작업 끝 알림과 «알림 시험»은 따로 정해서 넘겨요.
+async function osNotify($: EngineInterface, title: string, body: string, on: boolean = notifyOn) {
   // 기다리지 않고 부르는 함수라서 어떤 오류도 밖으로 새면 안 돼요. 알림이 안 떠도 일은 그대로 해요.
   try {
-    if ((!notifyOn && !force) || !(await isInteractive($))) return
+    if (!on || !(await isInteractive($))) return
     const exe = await powershellFor($)
     if (!exe) {
       void $.ui.notify(body || title, { title }).catch(() => {})
@@ -596,7 +600,7 @@ async function deskText($: EngineInterface): Promise<string> {
     lines.push(`대화 길이: ${snap.ctxPercent !== undefined ? Math.round(snap.ctxPercent) + '%' : '?'} (${snap.ctxTokens !== undefined ? k(snap.ctxTokens) : '?'} / ${snap.ctxWindow !== undefined ? k(snap.ctxWindow) : '?'})`)
   }
   lines.push(`이어가기: ${MODE_LABEL[mode]} · 프롬프트 가이드: ${coachOn ? '켜짐' : '꺼짐'}`)
-  lines.push(`발송 전 확인 ${sendConfirmOn ? '켜짐' : '꺼짐'} · 알림 ${notifyOn ? '켜짐' : '꺼짐'}`)
+  lines.push(`발송 전 확인 ${sendConfirmOn ? '켜짐' : '꺼짐'} · 질문·승인 알림 ${notifyOn ? '켜짐' : '꺼짐'} · 작업 끝 알림 ${notifyDoneOn ? '켜짐' : '꺼짐'}`)
   for (const g of sendLog.slice(0, 3)) lines.push(`  ${hhmm(g.at)} ${SEND_KIND[g.kind]} ${g.label}`)
   try {
     lines.push(`화면: ${(await $.session.surfaces()).join(', ')}`)
@@ -807,9 +811,9 @@ async function runChecks($: EngineInterface): Promise<void> {
       )
       out.push(psProblem ? { id: 'notify', label: '알림', state: 'bad', detail: psProblem } : { id: 'notify', label: '알림', state: 'ok', detail: '윈도우 알림을 써요' })
     }
-    if (!notifyOn) {
+    if (!notifyOn && !notifyDoneOn) {
       const i = out.findIndex(c => c.id === 'notify')
-      if (i >= 0) out[i] = { id: 'notify', label: '알림', state: 'na', detail: '꺼 뒀어요 (위 «알림» 스위치)' }
+      if (i >= 0) out[i] = { id: 'notify', label: '알림', state: 'na', detail: '두 알림 다 꺼 뒀어요 (위 스위치)' }
     }
 
     checks = out
@@ -1309,6 +1313,7 @@ function mailTab(els: Els, inner: number, now: number, act: MailHandlers) {
 type SettingsHandlers = {
   send: () => void
   notify: () => void
+  notifyDone: () => void
   coach: () => void
   recheck: () => void
   testNotify: () => void
@@ -1376,8 +1381,11 @@ function settingsTab(els: Els, inner: number, act: SettingsHandlers) {
       {toggle('발송 전 확인', sendConfirmOn, 'toggle-send', 's', act.send)}
       {para(els, inner, '메일·광고·일정·공유처럼 바깥으로 나가는 일은 보내기 전에 내용을 보여 주고 물어요.', { indent: 4, dim: true })}
       <Text> </Text>
-      {toggle('알림', notifyOn, 'toggle-notify', 'n', act.notify)}
-      {para(els, inner, `${cfg.notifyMinSeconds}초 넘게 걸린 일이 끝나거나, Claude가 질문하거나 승인을 기다리면 알려요.`, { indent: 4, dim: true })}
+      {toggle('질문·승인 알림', notifyOn, 'toggle-notify', 'n', act.notify)}
+      {para(els, inner, 'Claude가 질문하거나 승인을 기다리면 알려요.', { indent: 4, dim: true })}
+      <Text> </Text>
+      {toggle('작업 끝 알림', notifyDoneOn, 'toggle-notify-done', 'd', act.notifyDone)}
+      {para(els, inner, `${cfg.notifyMinSeconds}초 넘게 걸린 일이 끝나면 알려요.`, { indent: 4, dim: true })}
       <Text> </Text>
       {toggle('프롬프트 가이드', coachOn, 'toggle-coach', 'c', act.coach)}
       {para(els, inner, '흐릿한 요청이면 고쳐 줘요 · 켜면 작은 모델을 한 번 더 써요', { indent: 4, dim: true })}
@@ -1477,6 +1485,7 @@ export const register: Register = (on, options) => {
   coachOn = cfg.coach
   sendConfirmOn = cfg.sendConfirm
   notifyOn = cfg.notify
+  notifyDoneOn = cfg.notifyDone
 
   on('session.start', async ($, e, next) => {
     const storedMode = await $.store.get('mode')
@@ -1487,6 +1496,8 @@ export const register: Register = (on, options) => {
     if (typeof storedSend === 'boolean') sendConfirmOn = storedSend
     const storedNotify = await $.store.get('notify')
     if (typeof storedNotify === 'boolean') notifyOn = storedNotify
+    const storedDone = await $.store.get('notifyDone')
+    if (typeof storedDone === 'boolean') notifyDoneOn = storedDone
     await loadBoard($)
     rootDir = await $.session.root().catch(() => '')
     await loadChanges($)
@@ -1756,6 +1767,11 @@ export const register: Register = (on, options) => {
                     void $.store.set('notify', notifyOn)
                     redraw()
                   },
+                  notifyDone: () => {
+                    notifyDoneOn = !notifyDoneOn
+                    void $.store.set('notifyDone', notifyDoneOn)
+                    redraw()
+                  },
                   coach: () => {
                     coachOn = !coachOn
                     void $.store.set('coach', coachOn)
@@ -1789,10 +1805,11 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return result
     turnCount++
     // 오래 걸린 일이 끝났을 때 알림. 짧은 턴은 화면을 보고 계시니 조용히 둬요.
-    if (!e.isAborted && e.durationMs >= cfg.notifyMinSeconds * 1000) {
+    // «작업 끝 알림» 스위치를 켰을 때만 알려요(기본 꺼짐). 질문·승인 알림과 따로예요.
+    if (notifyDoneOn && !e.isAborted && e.durationMs >= cfg.notifyMinSeconds * 1000) {
       const secs = Math.round(e.durationMs / 1000)
       const took = secs >= 60 ? `${Math.floor(secs / 60)}분 ${secs % 60}초` : `${secs}초`
-      void osNotify($, `작업이 끝났어요 · ${took}`, String(e.answer ?? '').split('\n').find(l => l.trim()) ?? '')
+      void osNotify($, `작업이 끝났어요 · ${took}`, String(e.answer ?? '').split('\n').find(l => l.trim()) ?? '', true)
     }
     // 답변이 질문으로 끝나면 «내가 정해야 하는 것»에 올려요. (내가 다음 말을 하면 내려가요)
     try {

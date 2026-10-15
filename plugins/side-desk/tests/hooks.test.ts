@@ -63,6 +63,17 @@ function stub(on: any, surfaces: string[], choice: string, env: Record<string, s
   return { clock, asked, ran, runs, filled, opened, kv, usage }
 }
 
+// «작업 끝 알림»은 기본으로 꺼져 있어요. 켜 둔 상태로 세션을 시작해요.
+async function turnOnDone($: any, on: any, s: any) {
+  on('session.start', () => ({ cwd: '/work' }))
+  on('tool.register', () => ({ value: undefined }))
+  on('command.register', () => ({ value: undefined }))
+  on('fs.read', () => ({ value: '{"tasks":[]}' }))
+  s.kv.set('notifyDone', true)
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await s.clock.advance(0)
+}
+
 // ───────────── 보내기 전 확인 ─────────────
 
 test('화면 있음: 메일 보내기는 내용을 보여 주고 물어요', async ($, on) => {
@@ -113,14 +124,22 @@ test('설정에서 «보내기 전 확인»을 끄면 묻지 않아요', async (
 
 // ───────────── 알림 ─────────────
 
-test('알림: 60초 넘게 걸린 일이 끝나면 윈도우 알림을 띄워요', async ($, on) => {
+test('작업 끝 알림을 켜 두면: 60초 넘게 걸린 일이 끝날 때 윈도우 알림을 띄워요', async ($, on) => {
   const s = stub(on, ['terminal'], '보내기')
+  await turnOnDone($, on, s)
   await $.turn.complete({ turnId: 't1', answer: '보고서를 만들었어요\n자세한 내용은…', durationMs: 90_000, isAborted: false, usage: null })
   await s.clock.advance(0)
   const call = s.runs.find(a => /powershell/.test(a[0]))
   expect(call).toBeDefined()
   expect(call!.join(' ')).toMatch(/작업이 끝났어요 · 1분 30초/)
   expect(call!.join(' ')).toMatch(/보고서를 만들었어요/)
+})
+
+test('작업 끝 알림은 기본으로 꺼져 있어요: 오래 걸린 일이 끝나도 알리지 않아요', async ($, on) => {
+  const s = stub(on, ['terminal'], '보내기')
+  await $.turn.complete({ turnId: 'off1', answer: '끝났어요', durationMs: 300_000, isAborted: false, usage: null })
+  await s.clock.advance(0)
+  expect(s.runs.length).toBe(0)
 })
 
 test('알림: 짧은 일은 조용해요', async ($, on) => {
@@ -280,6 +299,7 @@ test('승인 대기: 화면 없는 실행에서는 알리지 않아요', async (
 
 test('맥·리눅스: 알림은 PowerShell 대신 Claude Code 의 터미널 알림으로 보내요', async ($, on) => {
   const s = stubPerm(on, { OS: '' })
+  await turnOnDone($, on, s)
   await $.turn.complete({ turnId: 'm1', answer: '정리를 끝냈어요', durationMs: 90_000, isAborted: false, usage: null })
   await s.clock.advance(0)
   expect(s.runs.length).toBe(0)

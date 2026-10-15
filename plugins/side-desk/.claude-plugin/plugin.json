@@ -1,11 +1,19 @@
 {
   "name": "side-desk",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Claude Code 옆에 «책상»을 열어 줘요. 할 일 고정, 고친 파일, 사용 한도, 대화 이어가기, 메일과 오늘 일정, 클립보드 기록, 설정 점검, 보내기 전 확인.",
-  "author": { "name": "daniel.kim" },
+  "author": {
+    "name": "daniel.kim"
+  },
   "license": "MIT",
   "repository": "https://github.com/daniel-kim-9way/side-desk",
-  "keywords": ["claude-code", "mod", "korean", "windows", "non-developer"],
+  "keywords": [
+    "claude-code",
+    "mod",
+    "korean",
+    "windows",
+    "non-developer"
+  ],
   "userConfig": {
     "warnAt": {
       "type": "number",
@@ -57,14 +65,20 @@
     },
     "notify": {
       "type": "string",
-      "title": "알림 (on / off)",
-      "description": "오래 걸린 일이 끝났을 때, 확인·질문·승인이 필요할 때 알림을 띄워요. 윈도우·WSL은 윈도우 알림, 맥·리눅스는 터미널 알림이에요.",
+      "title": "질문·승인 알림 (on / off)",
+      "description": "Claude가 질문하거나, 보내기 전 확인·승인을 기다릴 때 알림을 띄워요. 윈도우·WSL은 윈도우 알림, 맥·리눅스는 터미널 알림이에요.",
       "default": "on"
+    },
+    "notifyDone": {
+      "type": "string",
+      "title": "작업 끝 알림 (on / off)",
+      "description": "오래 걸린 일이 끝나면 알림을 띄워요. 기준 시간은 «작업 끝 알림을 띄울 시간». 기본은 꺼져 있어요.",
+      "default": "off"
     },
     "notifyMinSeconds": {
       "type": "number",
-      "title": "알림을 띄울 작업 시간(초)",
-      "description": "이 시간 넘게 걸린 일이 끝나면 알림을 띄워요.",
+      "title": "작업 끝 알림을 띄울 시간(초)",
+      "description": "작업 끝 알림을 켰을 때, 이 시간 넘게 걸린 일이 끝나면 알려요.",
       "default": 60
     },
     "autoOpen": {
