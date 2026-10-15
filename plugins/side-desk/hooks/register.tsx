@@ -385,6 +385,7 @@ async function autoOpenDesk($: EngineInterface) {
     await refreshUsage($)
     updateStatus($)
     if (tab === 'clip') void watchClipboard($)
+    if (tab === 'pin') void calOnTab($)
     if (tab === 'mail') void mailOnTab($)
     if (tab === 'settings') settingsOnTab($)
     const opened = await $.ui.open({ id: PANE, title: '책상', columns: cfg.paneColumns, closeOnEscape: true })
@@ -682,24 +683,35 @@ async function loadCalendar($: EngineInterface, opts: { quiet?: boolean } = {}):
   }
 }
 
-// 탭을 열 때: 처음이거나, 실패했거나, 2분 넘게 지난 목록이면 다시 읽어요. 일정도 같은 기준이에요.
+const stale = (state: string, at: number, now: number) => state === 'idle' || state === 'failed' || (state === 'ok' && now - at > MAIL_STALE_MS)
+
+// 메일 탭을 열 때: 처음이거나, 실패했거나, 2분 넘게 지난 목록이면 다시 읽어요.
 async function mailOnTab($: EngineInterface) {
-  const now = await $.clock.now()
-  const stale = (state: string, at: number) => state === 'idle' || state === 'failed' || (state === 'ok' && now - at > MAIL_STALE_MS)
-  await Promise.all([stale(mailState, mailAt) ? loadMailList($) : undefined, stale(calState, calAt) ? loadCalendar($) : undefined])
+  if (stale(mailState, mailAt, await $.clock.now())) await loadMailList($)
+}
+
+// 할 일 탭을 열 때: 일정도 같은 기준으로 다시 읽어요.
+async function calOnTab($: EngineInterface) {
+  if (stale(calState, calAt, await $.clock.now())) await loadCalendar($)
 }
 
 // 1분마다 불려요. 옆 창이 보이고 «메일» 탭을 보고 있을 때만, 읽은 지 5분이 지났으면 목록을 다시 읽어요.
 //  · 실패한 상태(연결 안 됨·권한 없음)에서는 저절로 다시 부르지 않아요. «다시 시도»를 누르면 돼요.
 async function mailTick($: EngineInterface) {
-  if (tab !== 'mail') return
-  const now = await $.clock.now()
-  const mailDue = mailState === 'ok' && now - mailAt >= MAIL_AUTO_MS
-  const calDue = calState === 'ok' && now - calAt >= MAIL_AUTO_MS
-  if (!mailDue && !calDue) return
+  if (tab !== 'mail' || mailState !== 'ok') return
+  if ((await $.clock.now()) - mailAt < MAIL_AUTO_MS) return
   const panes = await $.ui.panes().catch(() => [])
   if (!panes.some(p => p.id === PANE && p.isShown && p.isPlaced)) return
-  await Promise.all([mailDue ? loadMailList($, { quiet: true }) : undefined, calDue ? loadCalendar($, { quiet: true }) : undefined])
+  await loadMailList($, { quiet: true })
+}
+
+// 1분마다 불려요. 옆 창이 보이고 «할 일» 탭을 보고 있을 때만, 읽은 지 5분이 지났으면 일정을 다시 읽어요.
+async function calTick($: EngineInterface) {
+  if (tab !== 'pin' || calState !== 'ok') return
+  if ((await $.clock.now()) - calAt < MAIL_AUTO_MS) return
+  const panes = await $.ui.panes().catch(() => [])
+  if (!panes.some(p => p.id === PANE && p.isShown && p.isPlaced)) return
+  await loadCalendar($, { quiet: true })
 }
 
 // 줄을 누르면 그 메일(스레드)의 본문을 불러와요. Gmail 의 «읽음» 표시는 바꾸지 않아요.
@@ -1069,7 +1081,7 @@ function para(els: Els, inner: number, text: string, opts: { indent?: number; di
   )
 }
 
-type PinHandlers = { explain: (path: string) => void }
+type PinHandlers = { explain: (path: string) => void; refreshCal: () => void }
 
 const CHANGES_SHOWN = 6
 
@@ -1101,13 +1113,14 @@ function changesBlock(els: Els, inner: number, act: PinHandlers) {
   )
 }
 
-function pinTab(els: Els, inner: number, act: PinHandlers) {
+function pinTab(els: Els, inner: number, now: number, act: PinHandlers) {
   const { Box, Text } = els
   const open = board.todos.filter(t => !t.isDone)
   const doneCount = board.todos.length - open.length
   const empty = (text: string) => <Text dimColor>{'  ' + text}</Text>
   return (
     <Box flexDirection="column" width={inner + 2} padding={1}>
+      {calendarBlock(els, inner, now, act.refreshCal)}
       {heading(els, '내가 정해야 하는 것', board.decisions.length ? String(board.decisions.length) : '')}
       {board.decisions.length === 0 && empty('없음')}
       {board.decisions.flatMap(d => d.text.split(' / ').map(part => line(els, inner, '?', part)))}
@@ -1217,9 +1230,9 @@ function usageTab(els: Els, inner: number, act: HandoffHandlers) {
   )
 }
 
-// 메일 탭 맨 위의 오늘·내일 일정. 읽기만 해요. 캘린더가 안 붙어 있으면 한 줄로 알려 주고, 메일은 그대로 보여요.
-function calendarBlock(els: Els, inner: number, now: number) {
-  const { Box, Text } = els
+// 할 일 탭 맨 위의 오늘·내일 일정. 읽기만 해요. 캘린더가 안 붙어 있으면 한 줄로 알려 줘요.
+function calendarBlock(els: Els, inner: number, now: number, refresh: () => void) {
+  const { Box, Text, Button } = els
   const today = calEvents.filter(ev => ev.day === 'today')
   const tomorrow = calEvents.filter(ev => ev.day === 'tomorrow')
   const row = (ev: CalEvent) => {
@@ -1240,7 +1253,10 @@ function calendarBlock(els: Els, inner: number, now: number) {
   }
   return (
     <Box flexDirection="column" paddingBottom={1}>
-      {heading(els, '일정', '오늘·내일')}
+      <Box flexDirection="row" justifyContent="space-between" width={inner}>
+        {heading(els, '일정', '오늘·내일')}
+        <Button key="cal-refresh" label="새로고침" hotkey="r" plain dimColor onPress={refresh} />
+      </Box>
       {calState === 'failed' &&
         para(els, inner, /permission|권한|haven't granted/i.test(calProblem ?? '') ? '캘린더를 읽는 권한을 아직 안 받았어요. 설정 탭 «점검»에서 고치는 법을 보세요.' : '캘린더를 못 읽었어요. 설정 탭 «점검»에서 연결을 확인하세요.', { dim: true })}
       {(calState === 'idle' || (calState === 'loading' && !calLoaded)) && <Text dimColor>{'  불러오는 중…'}</Text>}
@@ -1291,12 +1307,10 @@ function mailTab(els: Els, inner: number, now: number, act: MailHandlers) {
   }
 
   const head = heading(els, '메일')
-  const cal = calendarBlock(els, inner, now)
   // 연결은 돼 있는데 도구 권한을 안 받은 경우(권한 묻기를 건너뛰지 않는 세션). 이때는 다시 연결해도 소용없어요.
   if (mailState === 'failed' && /permission|권한/i.test(mailProblem ?? '')) {
     return (
       <Box flexDirection="column" width={inner + 2} padding={1}>
-        {cal}
         {head}
         {para(els, inner, 'Gmail은 연결돼 있는데, 메일을 읽는 권한을 아직 안 받았어요.', { color: 'warning' })}
         {para(els, inner, '/permissions 에서 mcp__claude_ai_Gmail__search_threads 와 mcp__claude_ai_Gmail__get_thread 를 허용한 뒤 «다시 시도»를 누르세요.', { dim: true })}
@@ -1309,7 +1323,6 @@ function mailTab(els: Els, inner: number, now: number, act: MailHandlers) {
   if (mailState === 'failed') {
     return (
       <Box flexDirection="column" width={inner + 2} padding={1}>
-        {cal}
         {head}
         {para(els, inner, 'Gmail을 불러오지 못했어요. 연결이 안 돼 있거나 로그인이 풀렸을 수 있어요.', { color: 'warning' })}
         {mailProblem !== undefined && para(els, inner, mailProblem, { dim: true })}
@@ -1327,7 +1340,6 @@ function mailTab(els: Els, inner: number, now: number, act: MailHandlers) {
   const timeWidth = 5
   return (
     <Box flexDirection="column" width={inner + 2} padding={1}>
-      {cal}
       <Box flexDirection="row" justifyContent="space-between" width={inner}>
         {head}
         <Button key="mail-refresh" label="새로고침" hotkey="r" plain dimColor onPress={act.refresh} />
@@ -1511,8 +1523,8 @@ function clipTab(els: Els, inner: number, act: ClipHandlers) {
 // 탭 이름은 넓을 때·보통·좁을 때 세 벌. 탭 줄이 한 줄에 들어가는 가장 긴 벌을 골라요.
 const TABS: { name: TabName; hotkey: string; labels: [string, string, string] }[] = [
   { name: 'pin', hotkey: '1', labels: ['할 일', '할 일', '할일'] },
-  { name: 'usage', hotkey: '2', labels: ['사용량', '사용량', '한도'] },
-  { name: 'mail', hotkey: '3', labels: ['메일·일정', '메일', '메일'] },
+  { name: 'mail', hotkey: '2', labels: ['메일', '메일', '메일'] },
+  { name: 'usage', hotkey: '3', labels: ['사용량', '사용량', '한도'] },
   { name: 'clip', hotkey: '4', labels: ['클립보드', '클립', '클립'] },
   { name: 'cmds', hotkey: '5', labels: ['명령', '명령', '명령'] },
   { name: 'settings', hotkey: '6', labels: ['설정', '설정', '설정'] },
@@ -1586,9 +1598,10 @@ export const register: Register = (on, options) => {
     $.clock.every(60_000, () => {
       void refreshUsage($).then(() => updateStatus($))
       void mailTick($)
+      void calTick($)
     })
     // 명령어는 이름이 겹치면 던지니까 맨 뒤에서, 하나씩 감싸서 등록해요.
-    await registerCommand($, { name: 'desk', description: '책상 열기: 할 일·사용량(이어가기 포함)·메일·일정·클립·명령·설정. text 는 글로 보기, check 는 처음 설정 점검', argumentHint: '[text|check]', immediate: true })
+    await registerCommand($, { name: 'desk', description: '책상 열기: 할 일(일정 포함)·메일·사용량(이어가기 포함)·클립·명령·설정. text 는 글로 보기, check 는 처음 설정 점검', argumentHint: '[text|check]', immediate: true })
     await registerCommand($, { name: 'coach', description: '프롬프트 가이드 켜기·끄기', argumentHint: '[on|off]' })
     await registerCommand($, { name: 'handoff', description: '대화를 새 대화로 넘겨요', argumentHint: '[now|ask|auto|off]', immediate: true })
     await registerCommand($, { name: 'clip', description: '클립보드의 글을 입력창에 붙여요. 이미지는 파일로 저장하고 경로를 붙여요', immediate: true })
@@ -1606,6 +1619,7 @@ export const register: Register = (on, options) => {
     updateStatus($)
     // 창을 다시 열었는데 «클립» 탭이 선택돼 있으면 바로 읽어요. «메일» 탭이면 받은편지함 제목을 읽어요.
     if (tab === 'clip') void watchClipboard($)
+    if (tab === 'pin') void calOnTab($)
     if (tab === 'mail') void mailOnTab($)
     if (tab === 'settings') settingsOnTab($)
     await $.ui.open({ id: PANE, title: '책상', columns: cfg.paneColumns, focus: true, closeOnEscape: true })
@@ -1756,6 +1770,8 @@ export const register: Register = (on, options) => {
     // 옆이 아니라 입력창 위에 열렸다면(클래식 화면) 마우스가 안 눌려요. 클릭은 풀스크린 화면에서만 와요.
     const inline = e.props.placement === 'inline'
     lastPlacement = e.props.placement
+    // 책상이 /desk 없이 그려질 때(플러그인을 다시 읽은 뒤 등)도 일정을 한 번은 읽어요. 읽기 시작하면 상태가 바로 바뀌어서 한 번만 불러요.
+    if (tab === 'pin' && calState === 'idle') void loadCalendar($)
     const unfocused = e.props.isFocused === false
     // 풀스크린이 아닌 것이 확실할 때만 닫아요. 시작 직후 너비를 못 쟀거나(모름) 풀스크린인데 잠깐 좁은 때는 그대로 둬요.
     if (inline && e.viewport?.isFullscreen === false && !openedByUser && !inlineClosed) {
@@ -1784,6 +1800,7 @@ export const register: Register = (on, options) => {
           redraw()
           // 클립 탭은 열 때 감시를 시작해요. 메일 탭은 열 때 받은편지함 제목을 읽어요.
           if (name === 'clip') void watchClipboard($)
+          if (name === 'pin') void calOnTab($)
           if (name === 'mail') void mailOnTab($)
           if (name === 'settings') settingsOnTab($)
         }}
@@ -1791,12 +1808,13 @@ export const register: Register = (on, options) => {
     )
     const body =
       tab === 'pin'
-        ? pinTab(els, inner, {
+        ? pinTab(els, inner, now, {
             explain: (path: string) => {
               void $.prompt.fill({ text: changePrompt(path) }).then(r => {
                 $.ui.toast(r.isFilled ? '입력창에 넣었어요. Esc로 입력창에 돌아가 엔터를 누르면 물어봐요.' : '입력창에 못 넣었어요.', { timeoutMs: 6000 })
               })
             },
+            refreshCal: () => void loadCalendar($),
           })
         : tab === 'usage'
           ? usageTab(els, inner, {
@@ -1814,10 +1832,7 @@ export const register: Register = (on, options) => {
                   mailView = undefined
                   redraw()
                 },
-                refresh: () => {
-                  void loadMailList($)
-                  void loadCalendar($)
-                },
+                refresh: () => void loadMailList($),
                 connect: () => connectGmail($),
                 // 입력창을 이 글로 채우기만 해요. 보내기는 엔터로 해요.
                 ask: m => {

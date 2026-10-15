@@ -138,10 +138,10 @@ async function open($: any, clock: any) {
 }
 
 test('메일 탭을 열기 전에는 Gmail 을 부르지 않아요', async ($, on) => {
-  const { clock, state } = stubMail(on)
+  const { clock, gmail } = stubMail(on)
   await open($, clock)
   await clock.advance(120_000)
-  expect(state.calls.length).toBe(0)
+  expect(gmail().length).toBe(0)
 })
 
 test('메일 탭: 받은편지함 제목만 보여 주고, 연결된 계정을 적어요', async ($, on) => {
@@ -331,13 +331,12 @@ test('저절로 다시 읽다 실패하면 오류 화면으로 바꾸지 않고 
   await ui.unmount()
 })
 
-// ───────────── 일정 (메일 탭 맨 위) ─────────────
+// ───────────── 일정 (할 일 탭 맨 위) ─────────────
 
-test('메일 탭: 맨 위에 오늘·내일 일정을 보여 주고, 취소된 일정은 빼요', async ($, on) => {
-  const { clock, state } = stubMail(on)
+test('할 일 탭: 맨 위에 오늘·내일 일정을 보여 주고, 취소된 일정은 빼요', async ($, on) => {
+  const { clock, state, gmail } = stubMail(on)
   await clock.advance(nineAm())
   const ui = await open($, clock)
-  await ui.press({ key: 'tab-mail' })
   await clock.advance(0)
   const cal = state.calls.filter(c => c.server === 'claude.ai Google Calendar')
   expect(cal.map(c => c.tool)).toEqual(['list_events'])
@@ -354,29 +353,30 @@ test('메일 탭: 맨 위에 오늘·내일 일정을 보여 주고, 취소된 �
   // 이미 끝난 일정(7~8시)은 흐리게
   const done = await ui.findAll({ type: 'Text', text: /아침 운동/ })
   expect(done.some(t => t.props.dimColor === true)).toBe(true)
-  // 메일 목록도 그대로 있어요
-  expect(await ui.find({ type: 'Text', text: /보안 알림/ })).toBeDefined()
+  // 할 일 탭에서는 메일을 부르지 않아요
+  expect(gmail().length).toBe(0)
   await ui.unmount()
 })
 
-test('메일 탭: 오늘 일정이 없으면 «오늘 일정 없음»', async ($, on) => {
+test('할 일 탭: 오늘 일정이 없으면 «오늘 일정 없음»', async ($, on) => {
   const { clock, state } = stubMail(on)
   state.cal = 'empty'
   const ui = await open($, clock)
-  await ui.press({ key: 'tab-mail' })
   await clock.advance(0)
   expect(await ui.find({ type: 'Text', text: '  오늘 일정 없음' })).toBeDefined()
   await ui.unmount()
 })
 
-test('캘린더 권한이 없어도 메일은 보이고, 일정 자리에 한 줄로 알려요', async ($, on) => {
+test('캘린더 권한이 없으면 할 일 탭 일정 자리에 한 줄로 알리고, 메일 탭은 그대로예요', async ($, on) => {
   const { clock, state } = stubMail(on)
   state.cal = 'permission'
   const ui = await open($, clock)
-  await ui.press({ key: 'tab-mail' })
   await clock.advance(0)
   expect(await ui.find({ type: 'Text', text: /캘린더를 읽는 권한을 아직 안 받았어요/ })).toBeDefined()
+  await ui.press({ key: 'tab-mail' })
+  await clock.advance(0)
   expect(await ui.find({ type: 'Text', text: /보안 알림/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /캘린더/ })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -384,35 +384,42 @@ test('캘린더가 연결 안 돼 있어도 메일은 보여요', async ($, on) 
   const { clock, state } = stubMail(on)
   state.cal = 'throws'
   const ui = await open($, clock)
-  await ui.press({ key: 'tab-mail' })
   await clock.advance(0)
   expect(await ui.find({ type: 'Text', text: /캘린더를 못 읽었어요/ })).toBeDefined()
+  await ui.press({ key: 'tab-mail' })
+  await clock.advance(0)
   expect(await ui.find({ type: 'Text', text: /보안 알림/ })).toBeDefined()
   await ui.unmount()
 })
 
-test('«새로고침»은 메일과 일정을 같이 다시 읽어요', async ($, on) => {
+test('일정 «새로고침»은 일정만, 메일 «새로고침»은 메일만 다시 읽어요', async ($, on) => {
   const { clock, state, gmail } = stubMail(on)
+  const cal = () => state.calls.filter(c => c.server === 'claude.ai Google Calendar').length
   const ui = await open($, clock)
+  await clock.advance(0)
+  expect(cal()).toBe(1)
+  await ui.press({ key: 'cal-refresh' })
+  await clock.advance(0)
+  expect(cal()).toBe(2)
+  expect(gmail().length).toBe(0)
   await ui.press({ key: 'tab-mail' })
   await clock.advance(0)
   await ui.press({ key: 'mail-refresh' })
   await clock.advance(0)
   expect(gmail().length).toBe(2)
-  expect(state.calls.filter(c => c.server === 'claude.ai Google Calendar').length).toBe(2)
+  expect(cal()).toBe(2)
   await ui.unmount()
 })
 
-test('일정도 메일 탭을 보고 있는 동안 5분마다 저절로 다시 읽어요', async ($, on) => {
+test('일정은 할 일 탭을 보고 있는 동안 5분마다 다시 읽고, 다른 탭이면 안 읽어요', async ($, on) => {
   const { clock, state } = stubMail(on)
-  const ui = await open($, clock)
-  await ui.press({ key: 'tab-mail' })
-  await clock.advance(0)
   const cal = () => state.calls.filter(c => c.server === 'claude.ai Google Calendar').length
+  const ui = await open($, clock)
+  await clock.advance(0)
   expect(cal()).toBe(1)
   await clock.advance(6 * 60_000)
   expect(cal()).toBe(2)
-  await ui.press({ key: 'tab-pin' })
+  await ui.press({ key: 'tab-mail' })
   await clock.advance(10 * 60_000)
   expect(cal()).toBe(2)
   await ui.unmount()
